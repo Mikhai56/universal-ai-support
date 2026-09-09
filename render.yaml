@@ -1,0 +1,10 @@
+services:
+  - type: web
+    name: universal-ai-support
+    runtime: node
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_ENV
+        value: production

@@ -1,0 +1,1 @@
+{"name":"universal-ai-support","version":"0.1.0","private":true,"description":"Foundation for an AI-powered customer support service","type":"module","scripts":{"start":"node src/server.js","dev":"node --watch src/server.js"},"engines":{"node":">=20"}}

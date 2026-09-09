@@ -1,2 +1,0 @@
-# universal-ai-support
-Private
