@@ -1,10 +1,18 @@
 services:
-  - type: web
-    name: universal-ai-support
-    runtime: node
-    buildCommand: npm install
-    startCommand: npm start
-    healthCheckPath: /health
+  - type: worker
+    name: supportpilot-telegram
+    runtime: python
+    buildCommand: python3 -m py_compile bot.py
+    startCommand: python3 bot.py
+    maxShutdownDelaySeconds: 30
     envVars:
-      - key: NODE_ENV
-        value: production
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: DB_PATH
+        value: /var/data/supportpilot.db
+      - key: KB_PATH
+        value: /opt/render/project/src/knowledge_base.json
+    disk:
+      name: supportpilot-data
+      mountPath: /var/data
+      sizeGB: 5
