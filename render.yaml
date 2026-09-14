@@ -14,6 +14,12 @@ services:
         value: /var/data/supportpilot.db
       - key: KB_PATH
         value: /opt/render/project/src/knowledge_base.json
+      - key: MAX_MESSAGE_CHARS
+        value: "4096"
+      - key: RATE_LIMIT_SECONDS
+        value: "1.0"
+      - key: RETENTION_DAYS
+        value: "90"
     disk:
       name: supportpilot-data
       mountPath: /var/data
