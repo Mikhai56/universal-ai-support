@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """SupportPilot Telegram bot: sourced KB, SQLite, human escalation."""
 import html, json, os, re, sqlite3, time, urllib.error, urllib.request
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 BASE = Path(__file__).resolve().parent
@@ -10,13 +10,33 @@ ADMIN_CHAT_ID = os.getenv("ADMIN_CHAT_ID", "").strip()
 DB_PATH = os.getenv("DB_PATH", str(BASE / "supportpilot.db"))
 KB_PATH = os.getenv("KB_PATH", str(BASE / "knowledge_base.json"))
 TG_API = "https://api.telegram.org/bot" + TOKEN
+
+def positive_int(name, default, minimum=1, maximum=1_000_000):
+    try: value = int(os.getenv(name, str(default)))
+    except ValueError: return default
+    return min(max(value, minimum), maximum)
+
+def positive_float(name, default, minimum=0.0, maximum=60.0):
+    try: value = float(os.getenv(name, str(default)))
+    except ValueError: return default
+    return min(max(value, minimum), maximum)
+
+MAX_MESSAGE_CHARS = positive_int("MAX_MESSAGE_CHARS", 4096, 128, 16384)
+RATE_LIMIT_SECONDS = positive_float("RATE_LIMIT_SECONDS", 1.0)
+RETENTION_DAYS = positive_int("RETENTION_DAYS", 90, 1, 3650)
+LAST_MESSAGE_AT = {}
 with open(KB_PATH, encoding="utf-8") as file: KB = json.load(file)
 
 def now(): return datetime.now(timezone.utc).isoformat()
 def db():
-    conn=sqlite3.connect(DB_PATH); conn.row_factory=sqlite3.Row
+    conn=sqlite3.connect(DB_PATH,timeout=10); conn.row_factory=sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("""CREATE TABLE IF NOT EXISTS tickets(id INTEGER PRIMARY KEY AUTOINCREMENT,chat_id TEXT NOT NULL,username TEXT,question TEXT NOT NULL,answer TEXT,status TEXT NOT NULL,reason TEXT,created_at TEXT NOT NULL,resolved_at TEXT)""")
     conn.commit(); return conn
+
+def cleanup_old_tickets():
+    cutoff=(datetime.now(timezone.utc)-timedelta(days=RETENTION_DAYS)).isoformat()
+    conn=db(); conn.execute("DELETE FROM tickets WHERE created_at < ?",(cutoff,)); conn.commit(); conn.close()
 
 def api(method,payload=None):
     req=urllib.request.Request(f"{TG_API}/{method}",data=json.dumps(payload or {}).encode(),headers={"Content-Type":"application/json"})
@@ -24,6 +44,21 @@ def api(method,payload=None):
     if not result.get("ok"): raise RuntimeError(result)
     return result["result"]
 def send(chat_id,text): return api("sendMessage",{"chat_id":chat_id,"text":text,"parse_mode":"HTML"})
+
+def redact_sensitive(text):
+    text=re.sub(r"\b(?:\d[ -]*?){13,19}\b","[ДАННЫЕ КАРТЫ УДАЛЕНЫ]",text)
+    return re.sub(r"(?i)\b(cvv|cvc)\s*[:=]?\s*\d{3,4}\b",r"\1 [УДАЛЕНО]",text)
+
+def safe_text(text): return redact_sensitive((text or "").strip())[:MAX_MESSAGE_CHARS]
+
+def rate_limited(chat_id):
+    current=time.monotonic(); previous=LAST_MESSAGE_AT.get(str(chat_id),0.0)
+    LAST_MESSAGE_AT[str(chat_id)]=current
+    if len(LAST_MESSAGE_AT)>10000:
+        cutoff=current-max(RATE_LIMIT_SECONDS*10,60)
+        for key,value in list(LAST_MESSAGE_AT.items()):
+            if value<cutoff: LAST_MESSAGE_AT.pop(key,None)
+    return current-previous<RATE_LIMIT_SECONDS
 
 def words(text):
     stop={"как","какой","какая","какие","что","это","есть","ли","вы","можно","нужно","для","при","по","на","мне"}
@@ -47,14 +82,16 @@ def risky(question):
     return None
 
 def create_ticket(chat_id,username,question,answer,status,reason):
+    question=safe_text(question); username=safe_text(username)[:64]; answer=safe_text(answer)
     conn=db(); cur=conn.execute("INSERT INTO tickets(chat_id,username,question,answer,status,reason,created_at) VALUES(?,?,?,?,?,?,?)",(str(chat_id),username,question,answer,status,reason,now()))
     ticket_id=cur.lastrowid; conn.commit(); conn.close(); return ticket_id
 
 def escalate(chat_id,username,question,reason,public_answer=None):
-    answer=public_answer or "Я передал обращение специалисту, чтобы не дать неточный или небезопасный ответ. История диалога сохранена."
+    question=safe_text(question)
+    answer=public_answer or "Я передал обращение специалисту, чтобы не дать неточный или небезопасный ответ. История диалога сохранена на ограниченный срок."
     ticket_id=create_ticket(chat_id,username,question,answer,"escalated",reason)
     send(chat_id,f"🧑‍💼 {html.escape(answer)}\n\nНомер обращения: <b>#{ticket_id}</b>")
-    if ADMIN_CHAT_ID: send(ADMIN_CHAT_ID,f"🚨 <b>Новая эскалация #{ticket_id}</b>\nПричина: {html.escape(reason)}\nКлиент: @{html.escape(username or 'без username')}\n\n{html.escape(question)}\n\nЗакрыть: /resolve_{ticket_id}")
+    if ADMIN_CHAT_ID: send(ADMIN_CHAT_ID,f"🚨 <b>Новая эскалация #{ticket_id}</b>\nПричина: {html.escape(reason)}\nКлиент: @{html.escape((username or 'без username')[:64])}\n\n{html.escape(question)}\n\nЗакрыть: /resolve_{ticket_id}")
 
 def show_queue(chat_id):
     conn=db(); rows=conn.execute("SELECT id,username,question,reason FROM tickets WHERE status='escalated' ORDER BY id DESC LIMIT 10").fetchall(); conn.close()
@@ -68,16 +105,19 @@ def resolve(chat_id,ticket_id):
     send(chat_id,f"✅ Тикет #{ticket_id} закрыт."); send(row["chat_id"],f"✅ Обращение #{ticket_id} отмечено как решённое специалистом.")
 
 def handle(message):
-    chat_id=message["chat"]["id"]; text=(message.get("text") or "").strip(); user=message.get("from",{}); username=user.get("username") or user.get("first_name","")
+    chat_id=message["chat"]["id"]; raw_text=message.get("text") or ""; user=message.get("from",{}); username=safe_text(user.get("username") or user.get("first_name", ""))[:64]
+    if len(raw_text)>MAX_MESSAGE_CHARS: return send(chat_id,f"Сообщение слишком длинное. Максимум: {MAX_MESSAGE_CHARS} символов.")
+    text=raw_text.strip()
     if not text: return send(chat_id,"Пока я понимаю только текстовые сообщения.")
     if text=="/start": return send(chat_id,"Здравствуйте! Я — SupportPilot. Отвечу на типовые вопросы о «Юнити96», а сложный случай передам специалисту.\n\nНапишите вопрос одним сообщением.")
-    if text in ("/help","/privacy"): return send(chat_id,"Не отправляйте пароли, данные банковской карты и документы. Для связи со специалистом: /operator")
-    if text=="/operator": return escalate(chat_id,username,"Клиент запросил оператора","запрос клиента")
+    if text in ("/help","/privacy"): return send(chat_id,f"Не отправляйте пароли, данные банковской карты и документы. Обращения хранятся не более {RETENTION_DAYS} дней. Для связи со специалистом: /operator")
     is_admin=bool(ADMIN_CHAT_ID) and str(chat_id)==str(ADMIN_CHAT_ID)
     if is_admin and text=="/queue": return show_queue(chat_id)
     if is_admin and text.startswith("/resolve_"):
         try: return resolve(chat_id,int(text.split("_",1)[1]))
         except ValueError: return send(chat_id,"Неверный номер тикета.")
+    if rate_limited(chat_id): return send(chat_id,"Слишком много сообщений. Подождите немного и повторите.")
+    if text=="/operator": return escalate(chat_id,username,"Клиент запросил оператора","запрос клиента")
     reason=risky(text)
     if reason: return escalate(chat_id,username,text,reason)
     answer,topic,must_escalate,source=local_answer(text)
@@ -92,14 +132,14 @@ def handle(message):
 
 def run():
     if not TOKEN: raise SystemExit("Set TELEGRAM_BOT_TOKEN")
-    db().close(); offset=0; print("SupportPilot started",flush=True)
+    db().close(); cleanup_old_tickets(); offset=0; print("SupportPilot started",flush=True)
     while True:
         try:
             updates=api("getUpdates",{"offset":offset,"timeout":50,"allowed_updates":["message"]})
             for update in updates:
                 offset=update["update_id"]+1
                 if "message" in update: handle(update["message"])
-        except (urllib.error.URLError,TimeoutError,RuntimeError,ValueError) as error:
+        except (urllib.error.URLError,TimeoutError,RuntimeError,ValueError,sqlite3.Error) as error:
             print("Polling error:",error,flush=True); time.sleep(3)
         except KeyboardInterrupt: break
 if __name__=="__main__": run()
