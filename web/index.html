@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>SupportPilot — AI поддержка</title>
+  <style>
+    :root { font-family: Inter, system-ui, -apple-system, sans-serif; color: #18202a; background: #f5f7fb; }
+    * { box-sizing: border-box; }
+    body { margin: 0; min-height: 100vh; display: grid; place-items: center; }
+    .app { width: min(900px, 100%); min-height: 100vh; background: white; display: flex; flex-direction: column; }
+    header { padding: 22px 24px; border-bottom: 1px solid #e8ebf0; }
+    header h1 { margin: 0 0 5px; font-size: 22px; }
+    header p { margin: 0; color: #687386; }
+    #chat { flex: 1; padding: 24px; overflow: auto; display: flex; flex-direction: column; gap: 14px; }
+    .msg { max-width: 78%; padding: 13px 15px; border-radius: 16px; line-height: 1.45; white-space: pre-wrap; }
+    .bot { align-self: flex-start; background: #f0f3f8; }
+    .user { align-self: flex-end; background: #1f6feb; color: white; }
+    .meta { margin-top: 6px; font-size: 12px; opacity: .7; }
+    form { display: flex; gap: 10px; padding: 16px; border-top: 1px solid #e8ebf0; }
+    input { flex: 1; border: 1px solid #d8dde6; border-radius: 12px; padding: 13px 14px; font-size: 16px; outline: none; }
+    button { border: 0; border-radius: 12px; padding: 0 20px; font-size: 16px; cursor: pointer; background: #1f6feb; color: white; }
+    button:disabled { opacity: .6; cursor: wait; }
+    @media (min-width: 901px) { .app { min-height: 720px; max-height: 90vh; border: 1px solid #e8ebf0; border-radius: 18px; box-shadow: 0 18px 50px rgba(20,30,50,.08); } }
+  </style>
+</head>
+<body>
+  <main class="app">
+    <header><h1>SupportPilot</h1><p>AI-поддержка с базой знаний и передачей сложных обращений специалисту.</p></header>
+    <section id="chat" aria-live="polite"></section>
+    <form id="form"><input id="message" autocomplete="off" maxlength="4096" placeholder="Напишите вопрос…"><button id="send" type="submit">Отправить</button></form>
+  </main>
+  <script>
+    const chat = document.getElementById('chat');
+    const form = document.getElementById('form');
+    const input = document.getElementById('message');
+    const button = document.getElementById('send');
+    function add(text, role, meta='') {
+      const box = document.createElement('div'); box.className = 'msg ' + role; box.textContent = text;
+      if (meta) { const m = document.createElement('div'); m.className = 'meta'; m.textContent = meta; box.appendChild(m); }
+      chat.appendChild(box); chat.scrollTop = chat.scrollHeight;
+    }
+    add('Здравствуйте! Я SupportPilot. Задайте вопрос об ассортименте, доставке, сборке, оплате, возврате, гарантии или заказе.', 'bot');
+    form.addEventListener('submit', async (event) => {
+      event.preventDefault(); const message = input.value.trim(); if (!message) return;
+      add(message, 'user'); input.value = ''; input.focus(); button.disabled = true;
+      try {
+        const response = await fetch('/api/chat', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({message}) });
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || 'Ошибка сервера');
+        const meta = data.ticket_id ? `Обращение #${data.ticket_id}` : '';
+        add(data.answer || 'Нет ответа', 'bot', meta);
+      } catch (error) { add('Не удалось получить ответ. Попробуйте ещё раз.', 'bot'); console.error(error); }
+      finally { button.disabled = false; }
+    });
+  </script>
+</body>
+</html>
