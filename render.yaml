@@ -1,4 +1,22 @@
 services:
+  - type: web
+    name: supportpilot-web
+    runtime: docker
+    plan: free
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    healthCheckPath: /api/health
+    autoDeployTrigger: commit
+    envVars:
+      - key: PORT
+        value: 8080
+      - key: DB_PATH
+        value: /tmp/supportpilot.db
+      - key: KB_PATH
+        value: /app/knowledge_base.json
+      - key: MAX_MESSAGE_CHARS
+        value: "4000"
+
   - type: worker
     name: supportpilot-telegram
     runtime: python
