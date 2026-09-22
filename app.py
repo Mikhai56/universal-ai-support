@@ -198,6 +198,12 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_json({"ok":True,"service":"SupportPilot","version":"2.0","database":"postgres" if DATABASE_URL else "sqlite-fallback","ai":bool(AI_API_KEY),"auth":bool(ADMIN_PASSWORD)})
         if path=="/api/kb":
             return self.send_json({"items":KB,"count":len(KB)})
+        if path=="/api/leads":
+            if not self.require(): return
+            from lead_pipeline import list_leads
+            query=urlparse(self.path).query
+            status=query[7:] if query.startswith("status=") else None
+            return self.send_json({"leads":list_leads(status=status)})
         if path=="/api/tickets":
             if not self.require(): return
             return self.send_json({"tickets":list_tickets()})
@@ -224,9 +230,22 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_json({"ok":True})
         if path=="/api/chat":
             result=answer_question(p.get("message",""),p.get("name",""),p.get("email","")); return self.send_json(result)
+        if path=="/api/leads":
+            try:
+                from lead_pipeline import create_lead
+                lead_id=create_lead(p)
+            except ValueError as e: return self.send_json({"error":str(e)},400)
+            return self.send_json({"ok":True,"leadId":lead_id,"status":"NEW"},202)
         self.send_json({"error":"not found"},404)
     def do_PATCH(self):
         path=urlparse(self.path).path
+        if path.startswith("/api/leads/"):
+            if not self.require(): return
+            try:
+                from lead_pipeline import update_lead
+                lead_id=path.rsplit("/",1)[1]; ok=update_lead(lead_id,self.body())
+            except Exception as e: return self.send_json({"error":str(e)},400)
+            return self.send_json({"ok":bool(ok)})
         if path.startswith("/api/tickets/"):
             if not self.require(): return
             try: tid=int(path.rsplit("/",1)[1]); ok=update_ticket(tid,self.body())
