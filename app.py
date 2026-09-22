@@ -55,6 +55,8 @@ def init_db():
           priority TEXT NOT NULL DEFAULT 'normal', reason TEXT, assignee TEXT,
           customer_email TEXT, customer_name TEXT, created_at TEXT NOT NULL,
           updated_at TEXT NOT NULL, resolved_at TEXT)""")
+    from lead_pipeline import init_leads
+    init_leads(conn)
     conn.commit(); conn.close()
 
 def words(text):
@@ -181,7 +183,8 @@ class Handler(BaseHTTPRequestHandler):
         body=json.dumps(payload,ensure_ascii=False,default=str).encode()
         self.send_response(status); self.send_header("Content-Type","application/json; charset=utf-8")
         self.send_header("Content-Length",str(len(body))); self.send_header("Cache-Control","no-store")
-        self.send_header("Access-Control-Allow-Origin","*"); self.end_headers(); self.wfile.write(body)
+        self.send_header("Access-Control-Allow-Origin", "null" if self.headers.get("Origin") else "*")
+        self.end_headers(); self.wfile.write(body)
     def body(self):
         n=int(self.headers.get("Content-Length","0"))
         if n>1_000_000: raise ValueError("request too large")
@@ -190,7 +193,7 @@ class Handler(BaseHTTPRequestHandler):
         if not auth(self.headers): self.send_json({"error":"authentication required"},401); return False
         return True
     def do_OPTIONS(self):
-        self.send_response(204); self.send_header("Access-Control-Allow-Origin","*")
+        self.send_response(204); self.send_header("Access-Control-Allow-Origin", "null" if self.headers.get("Origin") else "*")
         self.send_header("Access-Control-Allow-Headers","Content-Type, Authorization"); self.send_header("Access-Control-Allow-Methods","GET,POST,PATCH,OPTIONS"); self.end_headers()
     def do_GET(self):
         path=urlparse(self.path).path
