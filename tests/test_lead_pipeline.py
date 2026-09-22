@@ -10,6 +10,7 @@ class LeadPipelineTests(unittest.TestCase):
         self.tmp=tempfile.NamedTemporaryFile(delete=False)
         self.tmp.close()
         os.environ["DB_PATH"]=self.tmp.name
+        app.DB_PATH=self.tmp.name
         conn=app.db()
         app.init_db()
         conn=app.db()
