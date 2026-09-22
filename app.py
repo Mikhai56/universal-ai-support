@@ -17,6 +17,9 @@ ADMIN_EMAIL = os.getenv("ADMIN_EMAIL", "admin@supportpilot.local")
 ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "")
 MAX_MESSAGE_CHARS = min(max(int(os.getenv("MAX_MESSAGE_CHARS", "4096")), 128), 16384)
 TOKEN_TTL = 60 * 60 * 12
+LEAD_RATE_WINDOW = 60
+LEAD_RATE_MAX = 10
+LEAD_RATE = {}
 
 with open(BASE / "knowledge_base.json", encoding="utf-8") as f:
     KB = json.load(f)
@@ -234,6 +237,13 @@ class Handler(BaseHTTPRequestHandler):
         if path=="/api/chat":
             result=answer_question(p.get("message",""),p.get("name",""),p.get("email","")); return self.send_json(result)
         if path=="/api/leads":
+            now=time.time()
+            client=self.client_address[0]
+            recent=[t for t in LEAD_RATE.get(client,[]) if now-t < LEAD_RATE_WINDOW]
+            if len(recent) >= LEAD_RATE_MAX:
+                LEAD_RATE[client]=recent
+                return self.send_json({"error":"too many lead submissions; try again later"},429)
+            LEAD_RATE[client]=recent+[now]
             try:
                 from lead_pipeline import create_lead
                 lead_id=create_lead(p)
