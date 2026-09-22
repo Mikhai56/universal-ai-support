@@ -3,6 +3,7 @@ from app import db, is_pg, redact_sensitive
 
 LEAD_STATUSES = ("NEW","RESEARCHING","QUALIFIED","PENDING_APPROVAL","SENT","REJECTED","FAILED")
 MAX_LEAD_BODY = 16 * 1024
+CARD_PATTERN = re.compile(r"\\b(?:\\d[ -]*?){13,19}\\b")
 
 def init_leads(conn):
     if is_pg(conn):
@@ -23,10 +24,15 @@ def init_leads(conn):
           CHECK (status IN ('NEW','RESEARCHING','QUALIFIED','PENDING_APPROVAL','SENT','REJECTED','FAILED'))
         )""")
 
+def sanitize_phone(value):
+    phone = str(value or "").strip()[:80]
+    return CARD_PATTERN.sub("[ДАННЫЕ КАРТЫ УДАЛЕНЫ]", phone)
+
 def create_lead(data):
+    if not isinstance(data, dict): raise ValueError("JSON body must be an object")
     name=str(data.get("name","")).strip()[:200]
     email=str(data.get("email","")).strip()[:320]
-    phone=str(data.get("phone","")).strip()[:80]
+    phone=sanitize_phone(data.get("phone",""))
     company=str(data.get("company","")).strip()[:200]
     message=redact_sensitive(str(data.get("message","")).strip())[:MAX_LEAD_BODY]
     if not name or not email or not message: raise ValueError("name, email and message are required")
@@ -50,6 +56,7 @@ def list_leads(status=None, limit=100):
     conn.close(); return [dict(x) for x in rs]
 
 def update_lead(lead_id, fields):
+    if not isinstance(fields, dict): raise ValueError("JSON body must be an object")
     allowed={"status","research","qualification_category","qualification_reason","generated_email"}
     fields={k:v for k,v in fields.items() if k in allowed}
     if "status" in fields and fields["status"] not in LEAD_STATUSES: raise ValueError("invalid lead status")
