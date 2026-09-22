@@ -34,5 +34,11 @@ class LeadPipelineTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             create_lead({"name":"Test","email":"not-an-email","message":"Hello"})
 
+    def test_redacts_card_data(self):
+        lead_id = create_lead({"name":"Test","email":"test@example.com","message":"Card 4111 1111 1111 1111"})
+        row = list_leads()[0]
+        self.assertEqual(row["id"], lead_id)
+        self.assertNotIn("4111 1111 1111 1111", row["message"])
+
 if __name__=="__main__":
     unittest.main()
