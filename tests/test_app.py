@@ -10,6 +10,7 @@ def load_app():
     os.environ['DB_PATH'] = tmp.name
     import app
     app.DB_PATH = tmp.name
+    app.init_db()
     return app, tmp.name
 
 
