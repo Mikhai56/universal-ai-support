@@ -42,7 +42,7 @@ def verify_password(password, encoded):
 
 def seed_operators(conn):
     users=[]
-    if ADMIN_PASSWORD: users.append((ADMIN_EMAIL,ADMIN_PASSWORD,"admin"))
+    if ADMIN_PASSWORD: users.append((str(ADMIN_EMAIL).strip().lower(),ADMIN_PASSWORD,"admin"))
     if OPERATORS_JSON:
         try:
             raw=json.loads(OPERATORS_JSON)
