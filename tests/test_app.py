@@ -55,3 +55,8 @@ if __name__ == '__main__':
         self.assertEqual(updated["assignee"],"Оператор")
         with self.assertRaises(ValueError):
             app.update_ticket(tid,{"status":"not-a-real-status"})
+
+
+
+if __name__ == '__main__':
+    unittest.main()
