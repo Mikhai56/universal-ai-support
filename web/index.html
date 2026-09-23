@@ -21,7 +21,7 @@ main{flex:1;min-width:0}.top{height:70px;background:#fff;border-bottom:1px solid
 </div></main></div>
 <script>
 let token=localStorage.getItem('sp_token')||'';let currentUser=null;const $=id=>document.getElementById(id);const titles={dashboard:'Обзор',chat:'AI-чат',tickets:'Обращения',customers:'Клиенты',leads:'Лиды',kb:'База знаний',settings:'Настройки'};
-function api(path,opt={}){opt.headers=Object.assign({'Content-Type':'application/json'},opt.headers||{},token?{'Authorization':'Bearer '+token}:{});return fetch(path,opt).then(async r=>{let d=await r.json();if(r.status===401){showLogin();throw Error('auth')}if(!r.ok)throw Error(d.error||'Ошибка');return d})}
+function api(path,opt={}){opt.headers=Object.assign({'Content-Type':'application/json'},opt.headers||{},token?{'Authorization':'Bearer '+token}:{});return fetch(path,opt).then(async r=>{let d={};try{d=await r.json()}catch(_){d={}}if(r.status===401){token='';localStorage.removeItem('sp_token');currentUser=null;showLogin();throw Error('Сессия истекла. Войдите снова.')}if(!r.ok)throw Error(d.error||('Ошибка HTTP '+r.status));return d})}
 function showLogin(){$('app').classList.add('hidden');$('login').classList.remove('hidden');$('operatorsPanel')?.classList.add('hidden')}
 function canWrite(){return currentUser?.role==='admin'||currentUser?.role==='operator'}
 function applyRoleUI(){document.querySelectorAll('.write-action').forEach(x=>x.classList.toggle('hidden',!canWrite()));document.querySelectorAll('.write-control').forEach(x=>x.disabled=!canWrite())}
