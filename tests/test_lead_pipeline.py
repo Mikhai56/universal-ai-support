@@ -27,6 +27,7 @@ class LeadPipelineTests(unittest.TestCase):
         rows=list_leads()
         self.assertEqual(rows[0]["id"],lead_id)
         self.assertEqual(rows[0]["status"],"NEW")
+        self.assertTrue(update_lead(lead_id,{"status":"RESEARCHING"}))
         self.assertTrue(update_lead(lead_id,{"status":"QUALIFIED","qualification_reason":"Relevant request"}))
         self.assertEqual(list_leads()[0]["status"],"QUALIFIED")
 
@@ -54,6 +55,8 @@ class LeadPipelineTests(unittest.TestCase):
         self.assertEqual(len(row["qualification_reason"]),2000)
         with self.assertRaises(ValueError):
             update_lead(lead_id,{"status":"INVALID"})
+        with self.assertRaises(ValueError):
+            update_lead(lead_id,{"status":"SENT"})
 
     def test_reject_invalid_email(self):
         with self.assertRaises(ValueError):
@@ -67,3 +70,18 @@ class LeadPipelineTests(unittest.TestCase):
 
 if __name__=="__main__":
     unittest.main()
+
+    def test_status_transitions(self):
+        lead_id=create_lead({"name":"Flow","email":"flow@example.com","message":"Hello"})
+        self.assertTrue(update_lead(lead_id,{"status":"RESEARCHING"}))
+        self.assertTrue(update_lead(lead_id,{"status":"QUALIFIED"}))
+        self.assertTrue(update_lead(lead_id,{"status":"PENDING_APPROVAL"}))
+        self.assertTrue(update_lead(lead_id,{"status":"SENT"}))
+        with self.assertRaises(ValueError):
+            update_lead(lead_id,{"status":"RESEARCHING"})
+
+    def test_failed_can_restart_research(self):
+        lead_id=create_lead({"name":"Retry","email":"retry@example.com","message":"Hello"})
+        update_lead(lead_id,{"status":"RESEARCHING"})
+        update_lead(lead_id,{"status":"FAILED"})
+        self.assertTrue(update_lead(lead_id,{"status":"RESEARCHING"}))
