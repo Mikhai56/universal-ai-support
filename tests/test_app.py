@@ -36,26 +36,35 @@ class SupportPilotTests(unittest.TestCase):
         self.assertTrue(result['ticket_id'])
         os.unlink(path)
 
-
-if __name__ == '__main__':
-    unittest.main()
-
-
     def test_ticket_detail_and_validation(self):
-        app=load_app()
-        result=app.answer_question("Как оформить возврат?")
-        tid=result["ticket_id"]
-        ticket=app.get_ticket(tid)
-        self.assertEqual(ticket["id"],tid)
-        self.assertIn("question",ticket)
-        self.assertTrue(app.update_ticket(tid,{"status":"resolved","priority":"high","assignee":"Оператор"}))
-        updated=app.get_ticket(tid)
-        self.assertEqual(updated["status"],"resolved")
-        self.assertEqual(updated["priority"],"high")
-        self.assertEqual(updated["assignee"],"Оператор")
+        app, path = load_app()
+        result = app.answer_question("Как оформить возврат?")
+        tid = result["ticket_id"]
+        ticket = app.get_ticket(tid)
+        self.assertEqual(ticket["id"], tid)
+        self.assertIn("question", ticket)
+        self.assertTrue(app.update_ticket(tid, {"status":"resolved","priority":"high","assignee":"Оператор"}))
+        updated = app.get_ticket(tid)
+        self.assertEqual(updated["status"], "resolved")
+        self.assertEqual(updated["priority"], "high")
+        self.assertEqual(updated["assignee"], "Оператор")
         with self.assertRaises(ValueError):
-            app.update_ticket(tid,{"status":"not-a-real-status"})
+            app.update_ticket(tid, {"status":"not-a-real-status"})
+        os.unlink(path)
 
+    def test_ticket_filters_and_search(self):
+        app, path = load_app()
+        first = app.create_ticket("Какой срок доставки?", "До 5 дней", "open", customer_name="Анна", customer_email="anna@example.com")
+        second = app.create_ticket("Нужна помощь с оплатой", "Передано оператору", "escalated", "платёжный инцидент", customer_name="Иван", customer_email="ivan@example.com")
+        self.assertEqual([x["id"] for x in app.list_tickets(status="open")], [first])
+        self.assertEqual([x["id"] for x in app.list_tickets(priority="high")], [second])
+        self.assertEqual([x["id"] for x in app.list_tickets(search="anna@example.com")], [first])
+        self.assertEqual([x["id"] for x in app.list_tickets(search="доставки")], [first])
+        with self.assertRaises(ValueError):
+            app.list_tickets(status="invalid")
+        with self.assertRaises(ValueError):
+            app.list_tickets(priority="invalid")
+        os.unlink(path)
 
 
 if __name__ == '__main__':
