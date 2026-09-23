@@ -68,9 +68,6 @@ class LeadPipelineTests(unittest.TestCase):
         self.assertEqual(row["id"], lead_id)
         self.assertNotIn("4111 1111 1111 1111", row["message"])
 
-if __name__=="__main__":
-    unittest.main()
-
     def test_status_transitions(self):
         lead_id=create_lead({"name":"Flow","email":"flow@example.com","message":"Hello"})
         self.assertTrue(update_lead(lead_id,{"status":"RESEARCHING"}))
@@ -85,3 +82,6 @@ if __name__=="__main__":
         update_lead(lead_id,{"status":"RESEARCHING"})
         update_lead(lead_id,{"status":"FAILED"})
         self.assertTrue(update_lead(lead_id,{"status":"RESEARCHING"}))
+
+if __name__=="__main__":
+    unittest.main()
