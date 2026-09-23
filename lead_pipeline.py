@@ -2,6 +2,15 @@ import re, secrets, time
 from app import db, is_pg, redact_sensitive
 
 LEAD_STATUSES = ("NEW","RESEARCHING","QUALIFIED","PENDING_APPROVAL","SENT","REJECTED","FAILED")
+LEAD_TRANSITIONS = {
+    "NEW": {"RESEARCHING", "REJECTED"},
+    "RESEARCHING": {"QUALIFIED", "REJECTED", "FAILED"},
+    "QUALIFIED": {"PENDING_APPROVAL", "REJECTED"},
+    "PENDING_APPROVAL": {"SENT", "REJECTED"},
+    "SENT": set(),
+    "REJECTED": set(),
+    "FAILED": {"RESEARCHING"},
+}
 MAX_LEAD_BODY = 16 * 1024
 CARD_PATTERN = re.compile(r"\b(?:\d[ -]*?){13,19}\b")
 
@@ -58,13 +67,32 @@ def list_leads(status=None, limit=100):
         rs=conn.execute("SELECT * FROM leads WHERE status=? ORDER BY created_at DESC LIMIT ?",(status,limit)).fetchall() if status else conn.execute("SELECT * FROM leads ORDER BY created_at DESC LIMIT ?",(limit,)).fetchall()
     conn.close(); return [dict(x) for x in rs]
 
+def get_lead(lead_id):
+    conn=db()
+    if is_pg(conn):
+        r=conn.execute("SELECT * FROM leads WHERE id=%s",(lead_id,)).fetchone()
+    else:
+        r=conn.execute("SELECT * FROM leads WHERE id=?",(lead_id,)).fetchone()
+    conn.close()
+    return dict(r) if r else None
+
 def update_lead(lead_id, fields):
     if not isinstance(fields, dict): raise ValueError("JSON body must be an object")
     allowed={"status","research","qualification_category","qualification_reason","generated_email"}
     fields={k:v for k,v in fields.items() if k in allowed}
     if "status" in fields and fields["status"] not in LEAD_STATUSES: raise ValueError("invalid lead status")
     if not fields: return False
-    conn=db(); pg=is_pg(conn); sets=[]; vals=[]
+    conn=db(); pg=is_pg(conn)
+    current = conn.execute("SELECT status FROM leads WHERE id="+("%s" if pg else "?"),(lead_id,)).fetchone()
+    if not current:
+        conn.close()
+        return False
+    current_status = current["status"] if isinstance(current, dict) else current[0]
+    requested_status = fields.get("status")
+    if requested_status and requested_status != current_status and requested_status not in LEAD_TRANSITIONS[current_status]:
+        conn.close()
+        raise ValueError("invalid lead status transition")
+    sets=[]; vals=[]
     for k,v in fields.items():
         if isinstance(v, str):
             limit=200 if k=="qualification_category" else 2000 if k=="qualification_reason" else MAX_LEAD_BODY
