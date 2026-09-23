@@ -3,7 +3,7 @@
 import hashlib, html, json, os, re, secrets, sqlite3, time, urllib.request, urllib.error
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 BASE = Path(__file__).resolve().parent
 HOST = os.getenv("HOST", "0.0.0.0")
@@ -227,8 +227,11 @@ class Handler(BaseHTTPRequestHandler):
         if path=="/api/leads":
             if not self.require(): return
             from lead_pipeline import list_leads
-            query=urlparse(self.path).query
-            status=query[7:] if query.startswith("status=") else None
+            status=parse_qs(urlparse(self.path).query).get("status",[None])[0]
+            if status:
+                from lead_pipeline import LEAD_STATUSES
+                if status not in LEAD_STATUSES:
+                    return self.send_json({"error":"invalid lead status"},400)
             return self.send_json({"leads":list_leads(status=status)})
         if path.startswith("/api/leads/"):
             if not self.require(): return
@@ -290,8 +293,12 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 from lead_pipeline import update_lead
                 lead_id=path.rsplit("/",1)[1]; ok=update_lead(lead_id,self.body())
-            except Exception as e: return self.send_json({"error":str(e)},400)
-            return self.send_json({"ok":bool(ok)})
+            except ValueError as e: return self.send_json({"error":str(e)},400)
+            except Exception:
+                return self.send_json({"error":"lead update failed"},500)
+            if not ok:
+                return self.send_json({"error":"lead not found"},404)
+            return self.send_json({"ok":True})
         if path.startswith("/api/tickets/"):
             if not self.require(): return
             try:
