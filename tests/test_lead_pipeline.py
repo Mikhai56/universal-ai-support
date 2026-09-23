@@ -30,6 +30,18 @@ class LeadPipelineTests(unittest.TestCase):
         self.assertTrue(update_lead(lead_id,{"status":"QUALIFIED","qualification_reason":"Relevant request"}))
         self.assertEqual(list_leads()[0]["status"],"QUALIFIED")
 
+    def test_redacts_card_data_in_phone_and_generated_fields(self):
+        lead_id = create_lead({
+            "name":"Test","email":"test@example.com",
+            "phone":"4111 1111 1111 1111",
+            "message":"Hello",
+            "generated_email":"Card 4111 1111 1111 1111"
+        })
+        row = list_leads()[0]
+        self.assertEqual(row["id"], lead_id)
+        self.assertNotIn("4111 1111 1111 1111", row["phone"])
+        self.assertNotIn("4111 1111 1111 1111", row["generated_email"])
+
     def test_reject_invalid_email(self):
         with self.assertRaises(ValueError):
             create_lead({"name":"Test","email":"not-an-email","message":"Hello"})
