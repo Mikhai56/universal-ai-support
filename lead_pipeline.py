@@ -99,7 +99,7 @@ def list_lead_events(lead_id, limit=100):
     conn.close()
     return [dict(x) for x in rs]
 
-def update_lead(lead_id, fields):
+def update_lead(lead_id, fields, actor="admin"):
     if not isinstance(fields, dict): raise ValueError("JSON body must be an object")
     allowed={"status","research","qualification_category","qualification_reason","generated_email"}
     fields={k:v for k,v in fields.items() if k in allowed}
@@ -128,7 +128,7 @@ def update_lead(lead_id, fields):
         import json
         details=json.dumps({"status":{"from":current_status,"to":fields.get("status",current_status)}},ensure_ascii=False)
         if pg:
-            conn.execute("INSERT INTO lead_events(lead_id,actor,action,details) VALUES(%s,%s,%s,%s)",(str(lead_id),"admin","lead.updated",details))
+            conn.execute("INSERT INTO lead_events(lead_id,actor,action,details) VALUES(%s,%s,%s,%s)",(str(lead_id),str(actor)[:160],"lead.updated",details))
         else:
             conn.execute("INSERT INTO lead_events(lead_id,actor,action,details,created_at) VALUES(?,?,?,?,datetime('now'))",(str(lead_id),"admin","lead.updated",details))
     conn.commit(); conn.close(); return bool(changed)
