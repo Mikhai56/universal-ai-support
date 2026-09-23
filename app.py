@@ -59,6 +59,52 @@ def seed_operators(conn):
         if is_pg(conn): conn.execute("INSERT INTO operators(email,password_hash,role) VALUES(%s,%s,%s)",(email,encoded,role))
         else: conn.execute("INSERT INTO operators(email,password_hash,role,created_at) VALUES(?,?,?,datetime('now'))",(email,encoded,role))
 
+def list_operators():
+    conn=db(); rs=conn.execute("SELECT email,role,created_at FROM operators ORDER BY email").fetchall(); conn.close()
+    return [row(x) for x in rs]
+
+def create_operator(email,password,role):
+    email=str(email or "").strip().lower(); password=str(password or "")
+    if not re.fullmatch(r"[^@\\s]+@[^@\\s]+\\.[^@\\s]+",email): raise ValueError("invalid operator email")
+    if len(password)<8 or len(password)>256: raise ValueError("password must be 8-256 characters")
+    if role not in ROLE_PERMISSIONS: raise ValueError("invalid operator role")
+    conn=db(); exists=conn.execute("SELECT email FROM operators WHERE email="+("%s" if is_pg(conn) else "?"),(email,)).fetchone()
+    if exists: conn.close(); raise ValueError("operator already exists")
+    encoded=hash_password(password)
+    if is_pg(conn): conn.execute("INSERT INTO operators(email,password_hash,role) VALUES(%s,%s,%s)",(email,encoded,role))
+    else: conn.execute("INSERT INTO operators(email,password_hash,role,created_at) VALUES(?,?,?,datetime('now'))",(email,encoded,role))
+    conn.commit(); conn.close(); return True
+
+def update_operator(email,fields):
+    email=str(email or "").strip().lower(); fields={k:v for k,v in (fields or {}).items() if k in {"role","password"}}
+    if not fields: return False
+    if "role" in fields and fields["role"] not in ROLE_PERMISSIONS: raise ValueError("invalid operator role")
+    if "password" in fields and not 8<=len(str(fields["password"]))<=256: raise ValueError("password must be 8-256 characters")
+    conn=db(); op=conn.execute("SELECT email,role FROM operators WHERE email="+("%s" if is_pg(conn) else "?"),(email,)).fetchone()
+    if not op: conn.close(); return False
+    old_role=op["role"]
+    new_role=fields.get("role",old_role)
+    if old_role=="admin" and new_role!="admin":
+        count=conn.execute("SELECT COUNT(*) AS n FROM operators WHERE role='admin'").fetchone()["n"]
+        if count<=1: conn.close(); raise ValueError("cannot remove the last admin")
+    sets=[]; vals=[]
+    if "role" in fields: sets.append("role="+("%s" if is_pg(conn) else "?")); vals.append(new_role)
+    if "password" in fields: sets.append("password_hash="+("%s" if is_pg(conn) else "?")); vals.append(hash_password(str(fields["password"])))
+    vals.append(email); conn.execute("UPDATE operators SET "+", ".join(sets)+" WHERE email="+("%s" if is_pg(conn) else "?"),vals)
+    conn.commit(); conn.close(); return True
+
+def delete_operator(email):
+    email=str(email or "").strip().lower(); conn=db()
+    op=conn.execute("SELECT role FROM operators WHERE email="+("%s" if is_pg(conn) else "?"),(email,)).fetchone()
+    if not op: conn.close(); return False
+    if op["role"]=="admin":
+        count=conn.execute("SELECT COUNT(*) AS n FROM operators WHERE role='admin'").fetchone()["n"]
+        if count<=1: conn.close(); raise ValueError("cannot delete the last admin")
+    conn.execute("DELETE FROM operators WHERE email="+("%s" if is_pg(conn) else "?"),(email,)); conn.commit(); conn.close()
+    for t,s in list(SESSIONS.items()):
+        if s.get("email")==email: SESSIONS.pop(t,None)
+    return True
+
 def pg_conn():
     import psycopg
     conn = psycopg.connect(DATABASE_URL, connect_timeout=10)
@@ -357,7 +403,7 @@ class Handler(BaseHTTPRequestHandler):
         return s
     def do_OPTIONS(self):
         self.send_response(204); self.send_header("Access-Control-Allow-Origin", "null" if self.headers.get("Origin") else "*")
-        self.send_header("Access-Control-Allow-Headers","Content-Type, Authorization"); self.send_header("Access-Control-Allow-Methods","GET,POST,PATCH,OPTIONS"); self.end_headers()
+        self.send_header("Access-Control-Allow-Headers","Content-Type, Authorization"); self.send_header("Access-Control-Allow-Methods","GET,POST,PATCH,DELETE,OPTIONS"); self.end_headers()
     def do_GET(self):
         path=urlparse(self.path).path
         if path=="/api/health":
@@ -366,6 +412,14 @@ class Handler(BaseHTTPRequestHandler):
             s=self.require()
             if not s: return
             return self.send_json({"user":{"email":s["email"],"role":s["role"]}})
+        if path=="/api/operators":
+            if not self.require("manage"): return
+            return self.send_json({"operators":list_operators()})
+        if path.startswith("/api/operators/"):
+            if not self.require("manage"): return
+            email=__import__("urllib.parse",fromlist=["unquote"]).unquote(path.rsplit("/",1)[1])
+            op=next((x for x in list_operators() if x["email"]==email.lower()),None)
+            return self.send_json({"operator":op} if op else {"error":"operator not found"},200 if op else 404)
         if path=="/api/kb":
             return self.send_json({"items":KB,"count":len(KB)})
         if path=="/api/leads":
@@ -426,6 +480,13 @@ class Handler(BaseHTTPRequestHandler):
             if not ADMIN_PASSWORD and not OPERATORS_JSON:
                 return self.send_json({"ok":False,"error":"No operator credentials are configured on the server"},503)
             return self.send_json({"ok":False,"error":"Неверный email или пароль"},401)
+        if path=="/api/operators":
+            s=self.require("manage")
+            if not s: return
+            try:
+                p=self.body(); create_operator(p.get("email"),p.get("password"),p.get("role"))
+            except ValueError as e: return self.send_json({"error":str(e)},400)
+            return self.send_json({"ok":True},201)
         if path=="/api/logout":
             token=(self.headers.get("Authorization") or "").replace("Bearer ","").strip(); SESSIONS.pop(token,None)
             return self.send_json({"ok":True})
@@ -444,6 +505,16 @@ class Handler(BaseHTTPRequestHandler):
                 lead_id=create_lead(p)
             except ValueError as e: return self.send_json({"error":str(e)},400)
             return self.send_json({"ok":True,"leadId":lead_id,"status":"NEW"},202)
+        self.send_json({"error":"not found"},404)
+    def do_DELETE(self):
+        path=urlparse(self.path).path
+        if path.startswith("/api/operators/"):
+            if not self.require("manage"): return
+            from urllib.parse import unquote
+            email=unquote(path.rsplit("/",1)[1])
+            try: ok=delete_operator(email)
+            except ValueError as e: return self.send_json({"error":str(e)},400)
+            return self.send_json({"ok":bool(ok)},200 if ok else 404)
         self.send_json({"error":"not found"},404)
     def do_PATCH(self):
         path=urlparse(self.path).path
