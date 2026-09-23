@@ -66,7 +66,9 @@ def update_lead(lead_id, fields):
     if not fields: return False
     conn=db(); pg=is_pg(conn); sets=[]; vals=[]
     for k,v in fields.items():
-        if isinstance(v, str): v=redact_sensitive(v)[:MAX_LEAD_BODY]
+        if isinstance(v, str):
+            limit=200 if k=="qualification_category" else 2000 if k=="qualification_reason" else MAX_LEAD_BODY
+            v=redact_sensitive(v)[:limit]
         sets.append(f"{k}={'%s' if pg else '?'}"); vals.append(v)
     sets.append("updated_at=NOW()" if pg else "updated_at=datetime('now')"); vals.append(lead_id)
     conn.execute(f"UPDATE leads SET {', '.join(sets)} WHERE id={'%s' if pg else '?'}",vals)
