@@ -3,7 +3,7 @@ import tempfile
 import unittest
 
 import app
-from lead_pipeline import create_lead, init_leads, list_leads, update_lead
+from lead_pipeline import create_lead, init_leads, list_leads, list_lead_events, update_lead
 
 class LeadPipelineTests(unittest.TestCase):
     def setUp(self):
@@ -29,6 +29,10 @@ class LeadPipelineTests(unittest.TestCase):
         self.assertTrue(update_lead(lead_id,{"status":"RESEARCHING"}))
         self.assertTrue(update_lead(lead_id,{"status":"QUALIFIED","qualification_reason":"Relevant request"}))
         self.assertEqual(list_leads()[0]["status"],"QUALIFIED")
+        events=list_lead_events(lead_id)
+        self.assertEqual(len(events),2)
+        self.assertTrue(all(e["action"]=="lead.updated" for e in events))
+        self.assertIn("QUALIFIED", events[0]["details"])
 
     def test_redacts_card_data_in_phone_and_generated_fields(self):
         lead_id = create_lead({
