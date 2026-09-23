@@ -178,7 +178,7 @@ def get_ticket(tid):
     conn.close()
     return row(r) if r else None
 
-def update_ticket(tid, fields):
+def update_ticket(tid, fields, actor="system"):
     allowed={"status","priority","assignee","customer_name","customer_email"}
     fields={k:v for k,v in fields.items() if k in allowed}
     if not fields: return None
@@ -191,14 +191,34 @@ def update_ticket(tid, fields):
     if "customer_name" in fields: fields["customer_name"]=str(fields["customer_name"])[:120]
     if "assignee" in fields: fields["assignee"]=str(fields["assignee"])[:120]
     conn=db(); pg=is_pg(conn)
+    ticket=conn.execute("SELECT status,priority,assignee FROM tickets WHERE id="+("%s" if pg else "?"),(tid,)).fetchone()
+    if not ticket:
+        conn.close()
+        return False
+    before=dict(ticket)
     sets=[]; vals=[]
     for k,v in fields.items(): sets.append(f"{k}={'%s' if pg else '?'}"); vals.append(v)
     sets.append("updated_at=NOW()" if pg else "updated_at=datetime('now')")
     if fields.get("status")=="resolved": sets.append("resolved_at=NOW()" if pg else "resolved_at=datetime('now')")
     vals.append(tid)
     q=f"UPDATE tickets SET {', '.join(sets)} WHERE id={'%s' if pg else '?'}"
-    conn.execute(q,vals); conn.commit(); conn.close()
+    conn.execute(q,vals)
+    after={k:fields.get(k,before[k]) for k in before}
+    changes={k:{"from":before[k],"to":after[k]} for k in before if before[k]!=after[k]}
+    if changes:
+        details=json.dumps(changes,ensure_ascii=False)
+        if pg:
+            conn.execute("INSERT INTO ticket_events(ticket_id,actor,action,details) VALUES(%s,%s,%s,%s)",(tid,str(actor)[:160],"ticket.updated",details))
+        else:
+            conn.execute("INSERT INTO ticket_events(ticket_id,actor,action,details,created_at) VALUES(?,?,?,?,datetime('now'))",(tid,str(actor)[:160],"ticket.updated",details))
+    conn.commit(); conn.close()
     return True
+
+def list_ticket_events(tid, limit=100):
+    limit=min(max(int(limit),1),100)
+    conn=db(); pg=is_pg(conn); p="%s" if pg else "?"
+    rs=conn.execute(f"SELECT * FROM ticket_events WHERE ticket_id={p} ORDER BY id DESC LIMIT {p}",(tid,limit)).fetchall()
+    conn.close(); return [row(x) for x in rs]
 
 def stats():
     ts=list_tickets(limit=1000)
@@ -268,7 +288,8 @@ class Handler(BaseHTTPRequestHandler):
             try: tid=int(path.rsplit("/",1)[1])
             except ValueError: return self.send_json({"error":"invalid ticket id"},400)
             ticket=get_ticket(tid)
-            return self.send_json({"ticket":ticket} if ticket else {"error":"ticket not found"},200 if ticket else 404)
+            if not ticket: return self.send_json({"error":"ticket not found"},404)
+            return self.send_json({"ticket":ticket,"events":list_ticket_events(tid)})
         if path=="/api/stats":
             if not self.require(): return
             return self.send_json(stats())
@@ -323,7 +344,7 @@ class Handler(BaseHTTPRequestHandler):
             if not self.require(): return
             try:
                 tid=int(path.rsplit("/",1)[1])
-                ok=update_ticket(tid,self.body())
+                ok=update_ticket(tid,self.body(),actor=ADMIN_EMAIL)
             except ValueError as e: return self.send_json({"error":str(e)},400)
             except Exception as e: return self.send_json({"error":"ticket update failed"},500)
             return self.send_json({"ok":bool(ok)})
