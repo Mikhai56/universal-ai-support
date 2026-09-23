@@ -105,6 +105,31 @@ class SupportPilotTests(unittest.TestCase):
         os.environ.pop("ADMIN_PASSWORD",None)
         os.unlink(path)
 
+
+    def test_auth_permissions_and_expiry(self):
+        app, path = load_app()
+        app.create_operator("admin@example.com", "adminpass", "admin")
+        app.create_operator("operator@example.com", "operatorpass", "operator")
+        app.create_operator("viewer@example.com", "viewerpass", "viewer")
+        tokens = {role: app.make_token(role+"@example.com", role) for role in ("admin", "operator", "viewer")}
+        for role, tok in tokens.items():
+            headers = {"Authorization": "Bearer " + tok}
+            self.assertIsNotNone(app.auth(headers, "read"))
+            self.assertEqual(app.auth(headers, "write") is not None, role in ("admin", "operator"))
+            self.assertEqual(app.auth(headers, "manage") is not None, role == "admin")
+        app.SESSIONS[tokens["operator"]]["expires"] = 0
+        self.assertIsNone(app.auth({"Authorization": "Bearer " + tokens["operator"]}, "read"))
+        os.unlink(path)
+
+    def test_lead_audit_records_authenticated_actor(self):
+        app, path = load_app()
+        from lead_pipeline import create_lead, list_lead_events, update_lead
+        lead_id = create_lead({"name": "Иван", "email": "ivan@example.com", "message": "Нужна консультация"})
+        self.assertTrue(update_lead(lead_id, {"status": "RESEARCHING"}, actor="operator@example.com"))
+        events = list_lead_events(lead_id)
+        self.assertEqual(events[0]["actor"], "operator@example.com")
+        os.unlink(path)
+
     def test_operator_password_hash_and_roles(self):
         app, path = load_app()
         self.assertTrue(app.verify_password("secret", app.hash_password("secret")))
