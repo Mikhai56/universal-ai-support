@@ -66,7 +66,7 @@ def list_operators():
 
 def create_operator(email,password,role):
     email=str(email or "").strip().lower(); password=str(password or "")
-    if not re.fullmatch(r"[^@\\s]+@[^@\\s]+\\.[^@\\s]+",email): raise ValueError("invalid operator email")
+    if not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+",email): raise ValueError("invalid operator email")
     if len(password)<8 or len(password)>256: raise ValueError("password must be 8-256 characters")
     if role not in ROLE_PERMISSIONS: raise ValueError("invalid operator role")
     conn=db(); exists=conn.execute("SELECT email FROM operators WHERE email="+("%s" if is_pg(conn) else "?"),(email,)).fetchone()
