@@ -18,6 +18,7 @@ ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "")
 OPERATORS_JSON = os.getenv("OPERATORS_JSON", "")
 MAX_MESSAGE_CHARS = min(max(int(os.getenv("MAX_MESSAGE_CHARS", "4096")), 128), 16384)
 TOKEN_TTL = 60 * 60 * 12
+SESSION_COOKIE_NAME = "sp_session"
 LEAD_RATE_WINDOW = 60
 LEAD_RATE_MAX = 10
 LEAD_RATE = {}
@@ -298,7 +299,10 @@ def update_ticket(tid, fields, actor="system"):
     sets=[]; vals=[]
     for k,v in fields.items(): sets.append(f"{k}={'%s' if pg else '?'}"); vals.append(v)
     sets.append("updated_at=NOW()" if pg else "updated_at=datetime('now')")
-    if fields.get("status")=="resolved": sets.append("resolved_at=NOW()" if pg else "resolved_at=datetime('now')")
+    if fields.get("status")=="resolved":
+        sets.append("resolved_at=NOW()" if pg else "resolved_at=datetime('now')")
+    elif "status" in fields:
+        sets.append("resolved_at=NULL")
     vals.append(tid)
     q=f"UPDATE tickets SET {', '.join(sets)} WHERE id={'%s' if pg else '?'}"
     conn.execute(q,vals)
@@ -398,7 +402,9 @@ class Handler(BaseHTTPRequestHandler):
         body=json.dumps(payload,ensure_ascii=False,default=str).encode()
         self.send_response(status); self.send_header("Content-Type","application/json; charset=utf-8")
         self.send_header("Content-Length",str(len(body))); self.send_header("Cache-Control","no-store")
-        if hasattr(self,"_set_session_cookie") and self._set_session_cookie:
+        if getattr(self,"_clear_session_cookie",False):
+            self.send_header("Set-Cookie",SESSION_COOKIE_NAME+"=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0")
+        elif getattr(self,"_set_session_cookie",""):
             self.send_header("Set-Cookie",SESSION_COOKIE_NAME+"="+self._set_session_cookie+"; Path=/; HttpOnly; SameSite=Lax; Max-Age="+str(TOKEN_TTL))
         self.send_header("Access-Control-Allow-Origin", "null" if self.headers.get("Origin") else "*")
         self.end_headers(); self.wfile.write(body)
@@ -501,7 +507,8 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_json({"ok":True},201)
         if path=="/api/logout":
             token=session_token(self.headers); SESSIONS.pop(token,None)
-            self._set_session_cookie="; Max-Age=0"
+            self._clear_session_cookie=True
+            self._set_session_cookie=""
             return self.send_json({"ok":True})
         if path=="/api/chat":
             result=answer_question(p.get("message",""),p.get("name",""),p.get("email","")); return self.send_json(result)
