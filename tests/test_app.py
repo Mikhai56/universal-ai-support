@@ -86,6 +86,14 @@ class SupportPilotTests(unittest.TestCase):
             app.list_tickets(priority="invalid")
         os.unlink(path)
 
+    def test_operator_password_hash_and_roles(self):
+        app, path = load_app()
+        self.assertTrue(app.verify_password("secret", app.hash_password("secret")))
+        self.assertFalse(app.verify_password("wrong", app.hash_password("secret")))
+        self.assertEqual(app.ROLE_PERMISSIONS["viewer"], {"read"})
+        self.assertIn("write", app.ROLE_PERMISSIONS["operator"])
+        os.unlink(path)
+
 
 if __name__ == '__main__':
     unittest.main()
