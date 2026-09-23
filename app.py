@@ -22,6 +22,9 @@ SESSION_COOKIE_NAME = "sp_session"
 LEAD_RATE_WINDOW = 60
 LEAD_RATE_MAX = 10
 LEAD_RATE = {}
+LOGIN_RATE_WINDOW = 300
+LOGIN_RATE_MAX = 8
+LOGIN_RATE = {}
 
 with open(BASE / "knowledge_base.json", encoding="utf-8") as f:
     KB = json.load(f)
@@ -398,6 +401,10 @@ def auth(h,permission="read"):
     return s if s and permission in ROLE_PERMISSIONS.get(s["role"],set()) else None
 
 class Handler(BaseHTTPRequestHandler):
+    def _origin(self):
+        allowed={x.strip() for x in os.getenv("CORS_ORIGINS","").split(",") if x.strip()}
+        origin=self.headers.get("Origin")
+        return origin if origin and origin in allowed else None
     def send_json(self,payload,status=200):
         body=json.dumps(payload,ensure_ascii=False,default=str).encode()
         self.send_response(status); self.send_header("Content-Type","application/json; charset=utf-8")
@@ -406,7 +413,6 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Set-Cookie",SESSION_COOKIE_NAME+"=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0")
         elif getattr(self,"_set_session_cookie",""):
             self.send_header("Set-Cookie",SESSION_COOKIE_NAME+"="+self._set_session_cookie+"; Path=/; HttpOnly; SameSite=Lax; Max-Age="+str(TOKEN_TTL))
-        self.send_header("Access-Control-Allow-Origin", "null" if self.headers.get("Origin") else "*")
         self.end_headers(); self.wfile.write(body)
     def body(self):
         n=int(self.headers.get("Content-Length","0"))
@@ -418,7 +424,11 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json({"error":"authentication required"},401); return None
         return s
     def do_OPTIONS(self):
-        self.send_response(204); self.send_header("Access-Control-Allow-Origin", "null" if self.headers.get("Origin") else "*")
+        self.send_response(204)
+        origin=self._origin()
+        if origin:
+            self.send_header("Access-Control-Allow-Origin",origin)
+            self.send_header("Vary","Origin")
         self.send_header("Access-Control-Allow-Headers","Content-Type, Authorization"); self.send_header("Access-Control-Allow-Methods","GET,POST,PATCH,DELETE,OPTIONS"); self.end_headers()
     def do_GET(self):
         path=urlparse(self.path).path
@@ -489,10 +499,17 @@ class Handler(BaseHTTPRequestHandler):
         except ValueError as e: return self.send_json({"error":str(e)},413 if "large" in str(e) else 400)
         if path=="/api/login":
             email=str(p.get("email","")).strip(); password=str(p.get("password",""))
+            now=time.time(); client=self.client_address[0]
+            recent=[t for t in LOGIN_RATE.get(client,[]) if now-t < LOGIN_RATE_WINDOW]
+            if len(recent) >= LOGIN_RATE_MAX:
+                LOGIN_RATE[client]=recent
+                return self.send_json({"ok":False,"error":"Слишком много попыток входа. Попробуйте позже."},429)
+            LOGIN_RATE[client]=recent+[now]
             conn=db()
             op=conn.execute("SELECT email,password_hash,role FROM operators WHERE email="+("%s" if is_pg(conn) else "?"),(email.lower(),)).fetchone()
             conn.close()
             if op and verify_password(password,op["password_hash"]):
+                LOGIN_RATE.pop(client,None)
                 self._set_session_cookie=make_token(op["email"],op["role"])
                 return self.send_json({"ok":True,"token":self._set_session_cookie,"user":{"email":op["email"],"role":op["role"]}})
             if not ADMIN_PASSWORD and not OPERATORS_JSON:
