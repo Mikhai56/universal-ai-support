@@ -32,9 +32,7 @@ def init_leads(conn):
           generated_email TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
           CHECK (status IN ('NEW','RESEARCHING','QUALIFIED','PENDING_APPROVAL','SENT','REJECTED','FAILED'))
         )""")
-
     init_lead_events(conn)
-
 
 def init_lead_events(conn):
     if is_pg(conn):
@@ -74,6 +72,7 @@ def create_lead(data):
 
 def list_leads(status=None, limit=100):
     conn=db()
+    limit=min(max(int(limit),1),100)
     if is_pg(conn):
         rs=conn.execute("SELECT * FROM leads WHERE status=%s ORDER BY created_at DESC LIMIT %s",(status,limit)).fetchall() if status else conn.execute("SELECT * FROM leads ORDER BY created_at DESC LIMIT %s",(limit,)).fetchall()
     else:
@@ -130,5 +129,5 @@ def update_lead(lead_id, fields, actor="admin"):
         if pg:
             conn.execute("INSERT INTO lead_events(lead_id,actor,action,details) VALUES(%s,%s,%s,%s)",(str(lead_id),str(actor)[:160],"lead.updated",details))
         else:
-            conn.execute("INSERT INTO lead_events(lead_id,actor,action,details,created_at) VALUES(?,?,?,?,datetime('now'))",(str(lead_id),"admin","lead.updated",details))
+            conn.execute("INSERT INTO lead_events(lead_id,actor,action,details,created_at) VALUES(?,?,?,?,datetime('now'))",(str(lead_id),str(actor)[:160],"lead.updated",details))
     conn.commit(); conn.close(); return bool(changed)
