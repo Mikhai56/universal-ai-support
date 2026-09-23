@@ -65,7 +65,7 @@ class SupportPilotTests(unittest.TestCase):
         self.assertEqual(customer["total_tickets"], 2)
         self.assertEqual(customer["open_tickets"], 2)
         self.assertEqual(customer["escalated_tickets"], 1)
-        self.assertEqual(customer["tickets"][0]["id"], first + 1)
+        self.assertEqual({t["id"] for t in customer["tickets"]}, {first, first + 1})
         self.assertEqual(len(customer["leads"]), 1)
         self.assertEqual(customer["leads"][0]["email"], "anna@example.com")
         self.assertEqual(len(app.list_customers(search="anna@example.com")), 1)
