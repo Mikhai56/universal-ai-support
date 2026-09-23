@@ -39,3 +39,19 @@ class SupportPilotTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+    def test_ticket_detail_and_validation(self):
+        app=load_app()
+        result=app.answer_question("Как оформить возврат?")
+        tid=result["ticket_id"]
+        ticket=app.get_ticket(tid)
+        self.assertEqual(ticket["id"],tid)
+        self.assertIn("question",ticket)
+        self.assertTrue(app.update_ticket(tid,{"status":"resolved","priority":"high","assignee":"Оператор"}))
+        updated=app.get_ticket(tid)
+        self.assertEqual(updated["status"],"resolved")
+        self.assertEqual(updated["priority"],"high")
+        self.assertEqual(updated["assignee"],"Оператор")
+        with self.assertRaises(ValueError):
+            app.update_ticket(tid,{"status":"not-a-real-status"})
