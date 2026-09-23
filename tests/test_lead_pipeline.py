@@ -42,6 +42,19 @@ class LeadPipelineTests(unittest.TestCase):
         self.assertNotIn("4111 1111 1111 1111", row["phone"])
         self.assertNotIn("4111 1111 1111 1111", row["generated_email"])
 
+    def test_detail_and_qualification_limits(self):
+        lead_id=create_lead({"name":"Test","email":"test@example.com","message":"Hello"})
+        from lead_pipeline import get_lead
+        row=get_lead(lead_id)
+        self.assertEqual(row["id"],lead_id)
+        self.assertTrue(update_lead(lead_id,{"status":"QUALIFIED","qualification_category":"x"*500,"qualification_reason":"y"*5000}))
+        row=get_lead(lead_id)
+        self.assertEqual(row["status"],"QUALIFIED")
+        self.assertEqual(len(row["qualification_category"]),200)
+        self.assertEqual(len(row["qualification_reason"]),2000)
+        with self.assertRaises(ValueError):
+            update_lead(lead_id,{"status":"INVALID"})
+
     def test_reject_invalid_email(self):
         with self.assertRaises(ValueError):
             create_lead({"name":"Test","email":"not-an-email","message":"Hello"})
