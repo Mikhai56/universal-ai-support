@@ -152,10 +152,30 @@ def list_tickets(status=None, limit=100):
         else: rs=conn.execute("SELECT * FROM tickets ORDER BY id DESC LIMIT ?",(limit,)).fetchall()
     conn.close(); return [row(x) for x in rs]
 
+TICKET_STATUSES={"answered","escalated","needs_clarification","open","resolved"}
+TICKET_PRIORITIES={"low","normal","high","urgent"}
+
+def get_ticket(tid):
+    conn=db()
+    if is_pg(conn):
+        r=conn.execute("SELECT * FROM tickets WHERE id=%s",(tid,)).fetchone()
+    else:
+        r=conn.execute("SELECT * FROM tickets WHERE id=?",(tid,)).fetchone()
+    conn.close()
+    return row(r) if r else None
+
 def update_ticket(tid, fields):
     allowed={"status","priority","assignee","customer_name","customer_email"}
     fields={k:v for k,v in fields.items() if k in allowed}
     if not fields: return None
+    if "status" in fields and fields["status"] not in TICKET_STATUSES: raise ValueError("invalid ticket status")
+    if "priority" in fields and fields["priority"] not in TICKET_PRIORITIES: raise ValueError("invalid ticket priority")
+    if "customer_email" in fields and fields["customer_email"]:
+        email=str(fields["customer_email"]).strip()
+        if not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+",email): raise ValueError("invalid customer email")
+        fields["customer_email"]=email
+    if "customer_name" in fields: fields["customer_name"]=str(fields["customer_name"])[:120]
+    if "assignee" in fields: fields["assignee"]=str(fields["assignee"])[:120]
     conn=db(); pg=is_pg(conn)
     sets=[]; vals=[]
     for k,v in fields.items(): sets.append(f"{k}={'%s' if pg else '?'}"); vals.append(v)
@@ -212,7 +232,15 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_json({"leads":list_leads(status=status)})
         if path=="/api/tickets":
             if not self.require(): return
-            return self.send_json({"tickets":list_tickets()})
+            query=urlparse(self.path).query
+            status=query[7:] if query.startswith("status=") else None
+            return self.send_json({"tickets":list_tickets(status=status)})
+        if path.startswith("/api/tickets/"):
+            if not self.require(): return
+            try: tid=int(path.rsplit("/",1)[1])
+            except ValueError: return self.send_json({"error":"invalid ticket id"},400)
+            ticket=get_ticket(tid)
+            return self.send_json({"ticket":ticket} if ticket else {"error":"ticket not found"},200 if ticket else 404)
         if path=="/api/stats":
             if not self.require(): return
             return self.send_json(stats())
@@ -261,8 +289,11 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_json({"ok":bool(ok)})
         if path.startswith("/api/tickets/"):
             if not self.require(): return
-            try: tid=int(path.rsplit("/",1)[1]); ok=update_ticket(tid,self.body())
-            except Exception as e: return self.send_json({"error":str(e)},400)
+            try:
+                tid=int(path.rsplit("/",1)[1])
+                ok=update_ticket(tid,self.body())
+            except ValueError as e: return self.send_json({"error":str(e)},400)
+            except Exception as e: return self.send_json({"error":"ticket update failed"},500)
             return self.send_json({"ok":bool(ok)})
         self.send_json({"error":"not found"},404)
     def log_message(self,fmt,*args): print("WEB",fmt%args,flush=True)
