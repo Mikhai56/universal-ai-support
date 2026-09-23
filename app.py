@@ -15,6 +15,7 @@ AI_BASE_URL = os.getenv("AI_BASE_URL", "https://api.openai.com/v1").rstrip("/")
 AI_MODEL = os.getenv("AI_MODEL", "gpt-4o-mini")
 ADMIN_EMAIL = os.getenv("ADMIN_EMAIL", "admin@supportpilot.local")
 ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "")
+OPERATORS_JSON = os.getenv("OPERATORS_JSON", "")
 MAX_MESSAGE_CHARS = min(max(int(os.getenv("MAX_MESSAGE_CHARS", "4096")), 128), 16384)
 TOKEN_TTL = 60 * 60 * 12
 LEAD_RATE_WINDOW = 60
@@ -24,6 +25,39 @@ LEAD_RATE = {}
 with open(BASE / "knowledge_base.json", encoding="utf-8") as f:
     KB = json.load(f)
 SESSIONS = {}
+ROLE_PERMISSIONS = {"admin":{"read","write","manage"},"operator":{"read","write"},"viewer":{"read"}}
+
+def hash_password(password, salt=None):
+    salt=salt or secrets.token_bytes(16)
+    digest=hashlib.pbkdf2_hmac("sha256", password.encode(), salt, 210000)
+    return "pbkdf2$210000$"+salt.hex()+"$"+digest.hex()
+
+def verify_password(password, encoded):
+    try:
+        _, rounds, salt_hex, digest_hex=encoded.split("$",3)
+        digest=hashlib.pbkdf2_hmac("sha256", password.encode(), bytes.fromhex(salt_hex), int(rounds))
+        return secrets.compare_digest(digest.hex(),digest_hex)
+    except Exception:
+        return False
+
+def seed_operators(conn):
+    users=[]
+    if ADMIN_PASSWORD: users.append((ADMIN_EMAIL,ADMIN_PASSWORD,"admin"))
+    if OPERATORS_JSON:
+        try:
+            raw=json.loads(OPERATORS_JSON)
+            if isinstance(raw,list):
+                for u in raw:
+                    if isinstance(u,dict) and u.get("email") and u.get("password") and u.get("role") in ROLE_PERMISSIONS:
+                        users.append((str(u["email"]).strip().lower(),str(u["password"]),u["role"]))
+        except Exception:
+            print("Invalid OPERATORS_JSON",flush=True)
+    for email,password,role in users:
+        existing=conn.execute("SELECT email FROM operators WHERE email="+("%s" if is_pg(conn) else "?"),(email,)).fetchone()
+        if existing: continue
+        encoded=hash_password(password)
+        if is_pg(conn): conn.execute("INSERT INTO operators(email,password_hash,role) VALUES(%s,%s,%s)",(email,encoded,role))
+        else: conn.execute("INSERT INTO operators(email,password_hash,role,created_at) VALUES(?,?,?,datetime('now'))",(email,encoded,role))
 
 def pg_conn():
     import psycopg
@@ -66,6 +100,17 @@ def init_db():
         conn.execute("""CREATE TABLE IF NOT EXISTS ticket_events(
           id INTEGER PRIMARY KEY AUTOINCREMENT, ticket_id INTEGER NOT NULL, actor TEXT NOT NULL,
           action TEXT NOT NULL, details TEXT, created_at TEXT NOT NULL)""")
+    if is_pg(conn):
+        conn.execute("""CREATE TABLE IF NOT EXISTS operators(
+          email TEXT PRIMARY KEY, password_hash TEXT NOT NULL, role TEXT NOT NULL,
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), CHECK (role IN ('admin','operator','viewer')))
+        """)
+    else:
+        conn.execute("""CREATE TABLE IF NOT EXISTS operators(
+          email TEXT PRIMARY KEY, password_hash TEXT NOT NULL, role TEXT NOT NULL,
+          created_at TEXT NOT NULL, CHECK (role IN ('admin','operator','viewer')))
+        """)
+    seed_operators(conn)
     from lead_pipeline import init_leads
     init_leads(conn)
     conn.commit(); conn.close()
@@ -280,13 +325,19 @@ def stats():
             "open":sum(x["status"] in ("escalated","needs_clarification","open") for x in ts),
             "resolved":sum(x["status"]=="resolved" for x in ts)}
 
-def make_token():
-    t=secrets.token_urlsafe(32); SESSIONS[t]=time.time()+TOKEN_TTL; return t
+def make_token(email,role):
+    t=secrets.token_urlsafe(32); SESSIONS[t]={"expires":time.time()+TOKEN_TTL,"email":email,"role":role}; return t
 
-def auth(h):
+def session(h):
     token=(h.get("Authorization") or "").replace("Bearer ","").strip()
-    if token and token in SESSIONS and SESSIONS[token]>time.time(): return True
-    return False
+    s=SESSIONS.get(token)
+    if s and s["expires"]>time.time(): return s
+    if token: SESSIONS.pop(token,None)
+    return None
+
+def auth(h,permission="read"):
+    s=session(h)
+    return s if s and permission in ROLE_PERMISSIONS.get(s["role"],set()) else None
 
 class Handler(BaseHTTPRequestHandler):
     def send_json(self,payload,status=200):
@@ -299,9 +350,11 @@ class Handler(BaseHTTPRequestHandler):
         n=int(self.headers.get("Content-Length","0"))
         if n>1_000_000: raise ValueError("request too large")
         return json.loads(self.rfile.read(n) or b"{}")
-    def require(self):
-        if not auth(self.headers): self.send_json({"error":"authentication required"},401); return False
-        return True
+    def require(self,permission="read"):
+        s=auth(self.headers,permission)
+        if not s:
+            self.send_json({"error":"authentication required"},401); return None
+        return s
     def do_OPTIONS(self):
         self.send_response(204); self.send_header("Access-Control-Allow-Origin", "null" if self.headers.get("Origin") else "*")
         self.send_header("Access-Control-Allow-Headers","Content-Type, Authorization"); self.send_header("Access-Control-Allow-Methods","GET,POST,PATCH,OPTIONS"); self.end_headers()
@@ -309,6 +362,10 @@ class Handler(BaseHTTPRequestHandler):
         path=urlparse(self.path).path
         if path=="/api/health":
             return self.send_json({"ok":True,"service":"SupportPilot","version":"2.0","database":"postgres" if DATABASE_URL else "sqlite-fallback","ai":bool(AI_API_KEY),"auth":bool(ADMIN_PASSWORD)})
+        if path=="/api/me":
+            s=self.require()
+            if not s: return
+            return self.send_json({"user":{"email":s["email"],"role":s["role"]}})
         if path=="/api/kb":
             return self.send_json({"items":KB,"count":len(KB)})
         if path=="/api/leads":
@@ -361,10 +418,13 @@ class Handler(BaseHTTPRequestHandler):
         except ValueError as e: return self.send_json({"error":str(e)},413 if "large" in str(e) else 400)
         if path=="/api/login":
             email=str(p.get("email","")).strip(); password=str(p.get("password",""))
-            if ADMIN_PASSWORD and email==ADMIN_EMAIL and secrets.compare_digest(password,ADMIN_PASSWORD):
-                return self.send_json({"ok":True,"token":make_token(),"user":{"email":email,"role":"admin"}})
-            if not ADMIN_PASSWORD:
-                return self.send_json({"ok":False,"error":"ADMIN_PASSWORD is not configured on the server"},503)
+            conn=db()
+            op=conn.execute("SELECT email,password_hash,role FROM operators WHERE email="+("%s" if is_pg(conn) else "?"),(email.lower(),)).fetchone()
+            conn.close()
+            if op and verify_password(password,op["password_hash"]):
+                return self.send_json({"ok":True,"token":make_token(op["email"],op["role"]),"user":{"email":op["email"],"role":op["role"]}})
+            if not ADMIN_PASSWORD and not OPERATORS_JSON:
+                return self.send_json({"ok":False,"error":"No operator credentials are configured on the server"},503)
             return self.send_json({"ok":False,"error":"Неверный email или пароль"},401)
         if path=="/api/logout":
             token=(self.headers.get("Authorization") or "").replace("Bearer ","").strip(); SESSIONS.pop(token,None)
@@ -388,10 +448,11 @@ class Handler(BaseHTTPRequestHandler):
     def do_PATCH(self):
         path=urlparse(self.path).path
         if path.startswith("/api/leads/"):
-            if not self.require(): return
+            s=self.require("write")
+            if not s: return
             try:
                 from lead_pipeline import update_lead
-                lead_id=path.rsplit("/",1)[1]; ok=update_lead(lead_id,self.body())
+                lead_id=path.rsplit("/",1)[1]; ok=update_lead(lead_id,self.body(),actor=s["email"])
             except ValueError as e: return self.send_json({"error":str(e)},400)
             except Exception:
                 return self.send_json({"error":"lead update failed"},500)
@@ -399,10 +460,11 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json({"error":"lead not found"},404)
             return self.send_json({"ok":True})
         if path.startswith("/api/tickets/"):
-            if not self.require(): return
+            s=self.require("write")
+            if not s: return
             try:
                 tid=int(path.rsplit("/",1)[1])
-                ok=update_ticket(tid,self.body(),actor=ADMIN_EMAIL)
+                ok=update_ticket(tid,self.body(),actor=s["email"])
             except ValueError as e: return self.send_json({"error":str(e)},400)
             except Exception as e: return self.send_json({"error":"ticket update failed"},500)
             return self.send_json({"ok":bool(ok)})
