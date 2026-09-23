@@ -88,15 +88,20 @@ class SupportPilotTests(unittest.TestCase):
 
     def test_operator_management_and_last_admin_protection(self):
         app, path = load_app()
-        os.environ["ADMIN_PASSWORD"]="supersecret"
+        app.create_operator("admin@example.com","adminpass","admin")
         app.create_operator("viewer@example.com","viewerpass","viewer")
         app.create_operator("operator@example.com","operatorpass","operator")
         ops={x["email"]:x for x in app.list_operators()}
         self.assertEqual(ops["viewer@example.com"]["role"],"viewer")
         self.assertNotIn("password_hash",ops["viewer@example.com"])
         self.assertTrue(app.update_operator("viewer@example.com",{"role":"operator","password":"newviewerpass"}))
-        self.assertTrue(app.verify_password("newviewerpass", next(dict(app.db().execute("SELECT password_hash FROM operators WHERE email=?",( "viewer@example.com",)).fetchone())).values()))
+        conn=app.db()
+        stored=conn.execute("SELECT password_hash FROM operators WHERE email=?", ("viewer@example.com",)).fetchone()["password_hash"]
+        conn.close()
+        self.assertTrue(app.verify_password("newviewerpass", stored))
         self.assertTrue(app.delete_operator("operator@example.com"))
+        with self.assertRaises(ValueError):
+            app.delete_operator("admin@example.com")
         os.environ.pop("ADMIN_PASSWORD",None)
         os.unlink(path)
 
