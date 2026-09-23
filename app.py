@@ -142,14 +142,28 @@ def answer_question(question, name="", email=""):
 def row(r):
     return dict(r)
 
-def list_tickets(status=None, limit=100):
-    conn=db()
-    if is_pg(conn):
-        if status: rs=conn.execute("SELECT * FROM tickets WHERE status=%s ORDER BY id DESC LIMIT %s",(status,limit)).fetchall()
-        else: rs=conn.execute("SELECT * FROM tickets ORDER BY id DESC LIMIT %s",(limit,)).fetchall()
-    else:
-        if status: rs=conn.execute("SELECT * FROM tickets WHERE status=? ORDER BY id DESC LIMIT ?",(status,limit)).fetchall()
-        else: rs=conn.execute("SELECT * FROM tickets ORDER BY id DESC LIMIT ?",(limit,)).fetchall()
+def list_tickets(status=None, priority=None, search=None, limit=100):
+    if status is not None and status not in TICKET_STATUSES:
+        raise ValueError("invalid ticket status")
+    if priority is not None and priority not in TICKET_PRIORITIES:
+        raise ValueError("invalid ticket priority")
+    search=str(search or "").strip()[:120]
+    limit=min(max(int(limit),1),100)
+    conn=db(); clauses=[]; vals=[]
+    if status:
+        clauses.append("status="+("%s" if is_pg(conn) else "?")); vals.append(status)
+    if priority:
+        clauses.append("priority="+("%s" if is_pg(conn) else "?")); vals.append(priority)
+    if search:
+        term="%"+search+"%"
+        op="%s" if is_pg(conn) else "?"
+        clauses.append("(" + " OR ".join(f"{field} LIKE {op}" for field in ("question","customer_name","customer_email","assignee")) + ")")
+        vals.extend([term]*4)
+    where=(" WHERE "+" AND ".join(clauses)) if clauses else ""
+    order="ORDER BY CASE priority WHEN 'urgent' THEN 0 WHEN 'high' THEN 1 WHEN 'normal' THEN 2 ELSE 3 END, id DESC"
+    placeholder="%s" if is_pg(conn) else "?"
+    vals.append(limit)
+    rs=conn.execute(f"SELECT * FROM tickets{where} {order} LIMIT {placeholder}",tuple(vals)).fetchall()
     conn.close(); return [row(x) for x in rs]
 
 TICKET_STATUSES={"answered","escalated","needs_clarification","open","resolved"}
@@ -240,9 +254,15 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_json({"lead":lead} if lead else {"error":"lead not found"},200 if lead else 404)
         if path=="/api/tickets":
             if not self.require(): return
-            query=urlparse(self.path).query
-            status=query[7:] if query.startswith("status=") else None
-            return self.send_json({"tickets":list_tickets(status=status)})
+            params=parse_qs(urlparse(self.path).query)
+            status=params.get("status",[None])[0]
+            priority=params.get("priority",[None])[0]
+            search=params.get("q",[""])[0]
+            try:
+                tickets=list_tickets(status=status,priority=priority,search=search)
+            except ValueError as e:
+                return self.send_json({"error":str(e)},400)
+            return self.send_json({"tickets":tickets})
         if path.startswith("/api/tickets/"):
             if not self.require(): return
             try: tid=int(path.rsplit("/",1)[1])
