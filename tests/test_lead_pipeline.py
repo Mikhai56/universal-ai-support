@@ -11,7 +11,6 @@ class LeadPipelineTests(unittest.TestCase):
         self.tmp.close()
         os.environ["DB_PATH"]=self.tmp.name
         app.DB_PATH=self.tmp.name
-        conn=app.db()
         app.init_db()
         conn=app.db()
         init_leads(conn)
@@ -48,6 +47,7 @@ class LeadPipelineTests(unittest.TestCase):
         from lead_pipeline import get_lead
         row=get_lead(lead_id)
         self.assertEqual(row["id"],lead_id)
+        self.assertTrue(update_lead(lead_id,{"status":"RESEARCHING"}))
         self.assertTrue(update_lead(lead_id,{"status":"QUALIFIED","qualification_category":"x"*500,"qualification_reason":"y"*5000}))
         row=get_lead(lead_id)
         self.assertEqual(row["status"],"QUALIFIED")
