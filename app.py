@@ -230,6 +230,11 @@ class Handler(BaseHTTPRequestHandler):
             query=urlparse(self.path).query
             status=query[7:] if query.startswith("status=") else None
             return self.send_json({"leads":list_leads(status=status)})
+        if path.startswith("/api/leads/"):
+            if not self.require(): return
+            from lead_pipeline import get_lead
+            lead=get_lead(path.rsplit("/",1)[1])
+            return self.send_json({"lead":lead} if lead else {"error":"lead not found"},200 if lead else 404)
         if path=="/api/tickets":
             if not self.require(): return
             query=urlparse(self.path).query
