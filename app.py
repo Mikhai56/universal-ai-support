@@ -373,9 +373,17 @@ def stats():
 
 def make_token(email,role):
     t=secrets.token_urlsafe(32); SESSIONS[t]={"expires":time.time()+TOKEN_TTL,"email":email,"role":role}; return t
+def session_token(h):
+    token=(h.get("Authorization") or "").replace("Bearer ","").strip()
+    if token: return token
+    cookie=h.get("Cookie","")
+    for part in cookie.split(";"):
+        k,v=(part.strip().split("=",1)+[""])[:2]
+        if k==SESSION_COOKIE_NAME: return v
+    return ""
 
 def session(h):
-    token=(h.get("Authorization") or "").replace("Bearer ","").strip()
+    token=session_token(h)
     s=SESSIONS.get(token)
     if s and s["expires"]>time.time(): return s
     if token: SESSIONS.pop(token,None)
@@ -390,6 +398,8 @@ class Handler(BaseHTTPRequestHandler):
         body=json.dumps(payload,ensure_ascii=False,default=str).encode()
         self.send_response(status); self.send_header("Content-Type","application/json; charset=utf-8")
         self.send_header("Content-Length",str(len(body))); self.send_header("Cache-Control","no-store")
+        if hasattr(self,"_set_session_cookie") and self._set_session_cookie:
+            self.send_header("Set-Cookie",SESSION_COOKIE_NAME+"="+self._set_session_cookie+"; Path=/; HttpOnly; SameSite=Lax; Max-Age="+str(TOKEN_TTL))
         self.send_header("Access-Control-Allow-Origin", "null" if self.headers.get("Origin") else "*")
         self.end_headers(); self.wfile.write(body)
     def body(self):
@@ -467,6 +477,7 @@ class Handler(BaseHTTPRequestHandler):
             self.send_response(200); self.send_header("Content-Type","text/html; charset=utf-8"); self.send_header("Content-Length",str(len(b))); self.end_headers(); self.wfile.write(b); return
         self.send_json({"error":"not found"},404)
     def do_POST(self):
+        self._set_session_cookie=""
         path=urlparse(self.path).path
         try: p=self.body()
         except ValueError as e: return self.send_json({"error":str(e)},413 if "large" in str(e) else 400)
@@ -476,7 +487,8 @@ class Handler(BaseHTTPRequestHandler):
             op=conn.execute("SELECT email,password_hash,role FROM operators WHERE email="+("%s" if is_pg(conn) else "?"),(email.lower(),)).fetchone()
             conn.close()
             if op and verify_password(password,op["password_hash"]):
-                return self.send_json({"ok":True,"token":make_token(op["email"],op["role"]),"user":{"email":op["email"],"role":op["role"]}})
+                self._set_session_cookie=make_token(op["email"],op["role"])
+                return self.send_json({"ok":True,"token":self._set_session_cookie,"user":{"email":op["email"],"role":op["role"]}})
             if not ADMIN_PASSWORD and not OPERATORS_JSON:
                 return self.send_json({"ok":False,"error":"No operator credentials are configured on the server"},503)
             return self.send_json({"ok":False,"error":"Неверный email или пароль"},401)
@@ -488,7 +500,8 @@ class Handler(BaseHTTPRequestHandler):
             except ValueError as e: return self.send_json({"error":str(e)},400)
             return self.send_json({"ok":True},201)
         if path=="/api/logout":
-            token=(self.headers.get("Authorization") or "").replace("Bearer ","").strip(); SESSIONS.pop(token,None)
+            token=session_token(self.headers); SESSIONS.pop(token,None)
+            self._set_session_cookie="; Max-Age=0"
             return self.send_json({"ok":True})
         if path=="/api/chat":
             result=answer_question(p.get("message",""),p.get("name",""),p.get("email","")); return self.send_json(result)
