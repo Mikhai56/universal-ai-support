@@ -76,6 +76,16 @@ def get_lead(lead_id):
     conn.close()
     return dict(r) if r else None
 
+def list_lead_events(lead_id, limit=100):
+    limit=min(max(int(limit),1),100)
+    conn=db(); pg=is_pg(conn); p="%s" if pg else "?"
+    try:
+        rs=conn.execute(f"SELECT * FROM lead_events WHERE lead_id={p} ORDER BY id DESC LIMIT {p}",(lead_id,limit)).fetchall()
+    except Exception:
+        rs=[]
+    conn.close()
+    return [dict(x) for x in rs]
+
 def update_lead(lead_id, fields):
     if not isinstance(fields, dict): raise ValueError("JSON body must be an object")
     allowed={"status","research","qualification_category","qualification_reason","generated_email"}
