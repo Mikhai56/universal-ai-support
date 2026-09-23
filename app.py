@@ -58,6 +58,14 @@ def init_db():
           priority TEXT NOT NULL DEFAULT 'normal', reason TEXT, assignee TEXT,
           customer_email TEXT, customer_name TEXT, created_at TEXT NOT NULL,
           updated_at TEXT NOT NULL, resolved_at TEXT)""")
+    if is_pg(conn):
+        conn.execute("""CREATE TABLE IF NOT EXISTS ticket_events(
+          id BIGSERIAL PRIMARY KEY, ticket_id BIGINT NOT NULL, actor TEXT NOT NULL,
+          action TEXT NOT NULL, details TEXT, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())""")
+    else:
+        conn.execute("""CREATE TABLE IF NOT EXISTS ticket_events(
+          id INTEGER PRIMARY KEY AUTOINCREMENT, ticket_id INTEGER NOT NULL, actor TEXT NOT NULL,
+          action TEXT NOT NULL, details TEXT, created_at TEXT NOT NULL)""")
     from lead_pipeline import init_leads
     init_leads(conn)
     conn.commit(); conn.close()
@@ -220,6 +228,51 @@ def list_ticket_events(tid, limit=100):
     rs=conn.execute(f"SELECT * FROM ticket_events WHERE ticket_id={p} ORDER BY id DESC LIMIT {p}",(tid,limit)).fetchall()
     conn.close(); return [row(x) for x in rs]
 
+def list_customers(search=None, limit=200):
+    search=str(search or "").strip()[:120]
+    limit=min(max(int(limit),1),200)
+    conn=db(); pg=is_pg(conn); p="%s" if pg else "?"
+    where=""
+    vals=[]
+    if search:
+        term="%"+search+"%"
+        where=" WHERE customer_email LIKE "+p+" OR customer_name LIKE "+p
+        vals.extend([term,term])
+    rs=conn.execute(f"SELECT * FROM tickets{where} ORDER BY created_at DESC LIMIT {p}",tuple(vals+[5000])).fetchall()
+    tickets=[row(x) for x in rs]
+    leads=[]
+    try:
+        lrs=conn.execute("SELECT id,email,name,company,status,created_at FROM leads ORDER BY created_at DESC LIMIT 5000").fetchall()
+        leads=[row(x) for x in lrs]
+    except Exception:
+        leads=[]
+    conn.close()
+    groups={}
+    for t in tickets:
+        email=(t.get("customer_email") or "").strip().lower()
+        name=(t.get("customer_name") or "").strip()
+        key=email or name.lower()
+        if not key:
+            continue
+        if key not in groups:
+            groups[key]={"key":key,"name":name or "Клиент","email":email or "",
+                         "total_tickets":0,"open_tickets":0,"escalated_tickets":0,
+                         "last_interaction":t.get("created_at"),"tickets":[],"leads":[]}
+        g=groups[key]
+        g["name"]=name or g["name"]
+        g["email"]=email or g["email"]
+        g["total_tickets"]+=1
+        if t.get("status") in ("escalated","needs_clarification","open"): g["open_tickets"]+=1
+        if t.get("status")=="escalated": g["escalated_tickets"]+=1
+        g["tickets"].append(t)
+    for l in leads:
+        email=(l.get("email") or "").strip().lower()
+        if email and email in groups:
+            groups[email]["leads"].append(l)
+    out=list(groups.values())
+    out.sort(key=lambda x: str(x.get("last_interaction") or ""), reverse=True)
+    return out[:limit]
+
 def stats():
     ts=list_tickets(limit=1000)
     return {"total":len(ts),"answered":sum(x["status"]=="answered" for x in ts),
@@ -290,6 +343,10 @@ class Handler(BaseHTTPRequestHandler):
             ticket=get_ticket(tid)
             if not ticket: return self.send_json({"error":"ticket not found"},404)
             return self.send_json({"ticket":ticket,"events":list_ticket_events(tid)})
+        if path=="/api/customers":
+            if not self.require(): return
+            search=parse_qs(urlparse(self.path).query).get("q",[""])[0]
+            return self.send_json({"customers":list_customers(search=search)})
         if path=="/api/stats":
             if not self.require(): return
             return self.send_json(stats())
