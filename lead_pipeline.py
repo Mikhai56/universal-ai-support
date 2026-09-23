@@ -33,6 +33,19 @@ def init_leads(conn):
           CHECK (status IN ('NEW','RESEARCHING','QUALIFIED','PENDING_APPROVAL','SENT','REJECTED','FAILED'))
         )""")
 
+    init_lead_events(conn)
+
+
+def init_lead_events(conn):
+    if is_pg(conn):
+        conn.execute("""CREATE TABLE IF NOT EXISTS lead_events(
+          id BIGSERIAL PRIMARY KEY, lead_id TEXT NOT NULL, actor TEXT NOT NULL,
+          action TEXT NOT NULL, details TEXT, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())""")
+    else:
+        conn.execute("""CREATE TABLE IF NOT EXISTS lead_events(
+          id INTEGER PRIMARY KEY AUTOINCREMENT, lead_id TEXT NOT NULL, actor TEXT NOT NULL,
+          action TEXT NOT NULL, details TEXT, created_at TEXT NOT NULL)""")
+
 def sanitize_phone(value):
     phone = str(value or "").strip()[:80]
     return CARD_PATTERN.sub("[ДАННЫЕ КАРТЫ УДАЛЕНЫ]", phone)
@@ -111,4 +124,11 @@ def update_lead(lead_id, fields):
     sets.append("updated_at=NOW()" if pg else "updated_at=datetime('now')"); vals.append(lead_id)
     conn.execute(f"UPDATE leads SET {', '.join(sets)} WHERE id={'%s' if pg else '?'}",vals)
     changed=conn.execute("SELECT 1 FROM leads WHERE id="+("%s" if pg else "?"),(lead_id,)).fetchone()
+    if changed:
+        import json
+        details=json.dumps({"status":{"from":current_status,"to":fields.get("status",current_status)}},ensure_ascii=False)
+        if pg:
+            conn.execute("INSERT INTO lead_events(lead_id,actor,action,details) VALUES(%s,%s,%s,%s)",(str(lead_id),"admin","lead.updated",details))
+        else:
+            conn.execute("INSERT INTO lead_events(lead_id,actor,action,details,created_at) VALUES(?,?,?,?,datetime('now'))",(str(lead_id),"admin","lead.updated",details))
     conn.commit(); conn.close(); return bool(changed)
