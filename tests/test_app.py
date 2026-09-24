@@ -44,11 +44,11 @@ class SupportPilotTests(unittest.TestCase):
         ticket = app.get_ticket(tid)
         self.assertEqual(ticket["id"], tid)
         self.assertIn("question", ticket)
-        self.assertTrue(app.update_ticket(tid, {"status":"resolved","priority":"high","assignee":"Оператор"}))
+        self.assertTrue(app.update_ticket(tid, {"status":"resolved","priority":"high","assignee":"operator@example.com"}))
         updated = app.get_ticket(tid)
         self.assertEqual(updated["status"], "resolved")
         self.assertEqual(updated["priority"], "high")
-        self.assertEqual(updated["assignee"], "Оператор")
+        self.assertEqual(updated["assignee"], "operator@example.com")
         with self.assertRaises(ValueError):
             app.update_ticket(tid, {"status":"not-a-real-status"})
         os.unlink(path)
