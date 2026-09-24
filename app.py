@@ -169,6 +169,20 @@ def init_db():
           email TEXT PRIMARY KEY, password_hash TEXT NOT NULL, role TEXT NOT NULL,
           created_at TEXT NOT NULL, CHECK (role IN ('admin','operator','viewer')))
         """)
+    if is_pg(conn):
+        conn.execute("""CREATE TABLE IF NOT EXISTS conversations(
+          id TEXT PRIMARY KEY, customer_name TEXT, customer_email TEXT,
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())""")
+        conn.execute("""CREATE TABLE IF NOT EXISTS messages(
+          id BIGSERIAL PRIMARY KEY, conversation_id TEXT NOT NULL, role TEXT NOT NULL,
+          content TEXT NOT NULL, status TEXT, ticket_id BIGINT, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())""")
+    else:
+        conn.execute("""CREATE TABLE IF NOT EXISTS conversations(
+          id TEXT PRIMARY KEY, customer_name TEXT, customer_email TEXT,
+          created_at TEXT NOT NULL, updated_at TEXT NOT NULL)""")
+        conn.execute("""CREATE TABLE IF NOT EXISTS messages(
+          id INTEGER PRIMARY KEY AUTOINCREMENT, conversation_id TEXT NOT NULL, role TEXT NOT NULL,
+          content TEXT NOT NULL, status TEXT, ticket_id INTEGER, created_at TEXT NOT NULL)""")
     seed_operators(conn)
     from lead_pipeline import init_leads
     init_leads(conn)
@@ -239,17 +253,25 @@ def answer_question(question, name="", email=""):
     reason=risky(question)
     if reason:
         answer="Я передал обращение специалисту, чтобы не дать неточный или небезопасный ответ. Не отправляйте пароли и полные реквизиты карты."
-        return {"answer":answer,"status":"escalated","ticket_id":create_ticket(question,answer,"escalated",reason,name,email)}
+        ticket_id=create_ticket(question,answer,"escalated",reason,name,email)
+        save_message(conversation_id,"assistant",answer,"escalated",ticket_id)
+        return {"answer":answer,"status":"escalated","ticket_id":ticket_id,"conversation_id":conversation_id}
     answer,topic,must_escalate,source=local_answer(question)
     if answer and must_escalate:
-        return {"answer":answer,"status":"escalated","ticket_id":create_ticket(question,answer,"escalated",topic,name,email),"source":source}
+        ticket_id=create_ticket(question,answer,"escalated",topic,name,email)
+        save_message(conversation_id,"assistant",answer,"escalated",ticket_id)
+        return {"answer":answer,"status":"escalated","ticket_id":ticket_id,"conversation_id":conversation_id,"source":source}
     ai=ai_answer(question)
     if ai:
-        return {"answer":ai,"status":"answered","ticket_id":create_ticket(question,ai,"answered",topic if answer else "AI",name,email),"source":source or "AI"}
+        save_message(conversation_id,"assistant",ai,"answered")
+        return {"answer":ai,"status":"answered","conversation_id":conversation_id,"source":source or "AI"}
     if answer:
-        return {"answer":answer,"status":"answered","ticket_id":create_ticket(question,answer,"answered",topic,name,email),"source":source}
+        save_message(conversation_id,"assistant",answer,"answered")
+        return {"answer":answer,"status":"answered","conversation_id":conversation_id,"source":source}
     fallback="Я пока не нашёл точного ответа. Уточните вопрос или передам его менеджеру."
-    return {"answer":fallback,"status":"needs_clarification","ticket_id":create_ticket(question,fallback,"needs_clarification","недостаточно данных",name,email)}
+    ticket_id=create_ticket(question,fallback,"needs_clarification","недостаточно данных",name,email)
+    save_message(conversation_id,"assistant",fallback,"needs_clarification",ticket_id)
+    return {"answer":fallback,"status":"needs_clarification","ticket_id":ticket_id,"conversation_id":conversation_id}
 
 def row(r):
     return dict(r)
@@ -461,6 +483,10 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_json({"operator":op} if op else {"error":"operator not found"},200 if op else 404)
         if path=="/api/kb":
             return self.send_json({"items":KB,"count":len(KB)})
+        if path.startswith("/api/conversations/") and path.endswith("/messages"):
+            if not self.require(): return
+            conversation_id=path.split("/")[3]
+            return self.send_json({"conversation_id":conversation_id,"messages":list_messages(conversation_id)})
         if path=="/api/leads":
             if not self.require(): return
             from lead_pipeline import list_leads
@@ -541,7 +567,7 @@ class Handler(BaseHTTPRequestHandler):
             self._set_session_cookie=""
             return self.send_json({"ok":True})
         if path=="/api/chat":
-            result=answer_question(p.get("message",""),p.get("name",""),p.get("email","")); return self.send_json(result)
+            result=answer_question(p.get("message",""),p.get("name",""),p.get("email",""),p.get("conversation_id","")); return self.send_json(result)
         if path=="/api/leads":
             now=time.time()
             client=self.client_address[0]
