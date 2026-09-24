@@ -17,7 +17,16 @@ ADMIN_EMAIL = os.getenv("ADMIN_EMAIL", "admin@supportpilot.local")
 ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "")
 OPERATORS_JSON = os.getenv("OPERATORS_JSON", "")
 MAX_MESSAGE_CHARS = min(max(int(os.getenv("MAX_MESSAGE_CHARS", "4096")), 128), 16384)
-TOKEN_TTL = 60 * 60 * 12\nPASSWORD_MIN_LENGTH = 12\n\ndef validate_password(password):\n    password=str(password or "")\n    if not PASSWORD_MIN_LENGTH <= len(password) <= 256:\n        raise ValueError("password must be 12-256 characters")\n    if not re.search(r"[A-Z]", password) or not re.search(r"[a-z]", password) or not re.search(r"\\d", password):\n        raise ValueError("password must include uppercase, lowercase, and a digit")\n    return password
+TOKEN_TTL = 60 * 60 * 12
+PASSWORD_MIN_LENGTH = 12
+
+def validate_password(password):
+    password = str(password or "")
+    if not PASSWORD_MIN_LENGTH <= len(password) <= 256:
+        raise ValueError("password must be 12-256 characters")
+    if not re.search(r"[A-Z]", password) or not re.search(r"[a-z]", password) or not re.search(r"\d", password):
+        raise ValueError("password must include uppercase, lowercase, and a digit")
+    return password
 SESSION_COOKIE_NAME = "sp_session"
 SECURE_COOKIES = os.getenv("SECURE_COOKIES", "0").strip().lower() in {"1", "true", "yes", "on"}
 
