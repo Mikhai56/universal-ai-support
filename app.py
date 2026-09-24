@@ -549,7 +549,8 @@ class Handler(BaseHTTPRequestHandler):
             if origin in allowed:
                 return True
             try:
-                return origin == f"{urlparse(self.path).scheme or 'http'}://{self.headers.get('Host','')}"
+                parsed=urlparse(origin)
+                return parsed.scheme in {"http","https"} and parsed.netloc == self.headers.get("Host","")
             except Exception:
                 return False
         referer=self.headers.get("Referer")
@@ -668,7 +669,9 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_json({"notifications":items,"unread":sum(1 for x in items if not x.get("read_at"))})
         if path in ("/","/index.html"):
             f=BASE/"web"/"index.html"; b=f.read_bytes()
-            self.send_response(200); self.send_header("Content-Type","text/html; charset=utf-8"); self.send_header("Content-Length",str(len(b))); self.send_header("Cache-Control","no-store"); self.send_header("X-Content-Type-Options","nosniff"); self.send_header("X-Frame-Options","DENY"); self.send_header("Referrer-Policy","no-referrer"); self.send_header("Content-Security-Policy","default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'") ; self.end_headers(); self.wfile.write(b); return
+            self.send_response(200); self.send_header("Content-Type","text/html; charset=utf-8"); self.send_header("Content-Length",str(len(b))); self.send_header("Cache-Control","no-store"); self.send_header("X-Content-Type-Options","nosniff"); self.send_header("X-Frame-Options","DENY"); self.send_header("Referrer-Policy","no-referrer"); self.send_header("Permissions-Policy","geolocation=(), camera=(), microphone=()");
+            if SECURE_COOKIES: self.send_header("Strict-Transport-Security","max-age=31536000; includeSubDomains")
+            self.send_header("Content-Security-Policy","default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'") ; self.end_headers(); self.wfile.write(b); return
         self.send_json({"error":"not found"},404)
     def do_POST(self):
         self._set_session_cookie=""
