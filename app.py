@@ -205,6 +205,7 @@ def init_db():
           id INTEGER PRIMARY KEY AUTOINCREMENT, recipient TEXT, kind TEXT NOT NULL, title TEXT NOT NULL,
           body TEXT, ticket_id INTEGER, created_at TEXT NOT NULL, read_at TEXT)""")
     seed_operators(conn)
+    init_finance_db(conn)
     from lead_pipeline import init_leads
     init_leads(conn)
     conn.commit(); conn.close()
@@ -463,6 +464,165 @@ def list_customers(search=None, limit=200):
     out.sort(key=lambda x: str(x.get("last_interaction") or ""), reverse=True)
     return out[:limit]
 
+
+def _money_amount(value):
+    from decimal import Decimal, InvalidOperation
+    try:
+        amount=Decimal(str(value)).quantize(Decimal("0.000001"))
+    except (InvalidOperation, ValueError):
+        raise ValueError("invalid amount")
+    if amount <= 0 or amount > Decimal("1000000000000"):
+        raise ValueError("amount must be greater than 0 and within limits")
+    return format(amount, "f")
+
+def init_finance_db(conn):
+    if is_pg(conn):
+        conn.execute("""CREATE TABLE IF NOT EXISTS money_accounts(
+          id BIGSERIAL PRIMARY KEY, name TEXT NOT NULL, currency TEXT NOT NULL,
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), UNIQUE(name,currency))""")
+        conn.execute("""CREATE TABLE IF NOT EXISTS money_transactions(
+          id BIGSERIAL PRIMARY KEY, account_id BIGINT NOT NULL, kind TEXT NOT NULL,
+          amount TEXT NOT NULL, description TEXT, reference TEXT,
+          created_by TEXT NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          CHECK (kind IN ('credit','debit')))""")
+        conn.execute("""CREATE TABLE IF NOT EXISTS crypto_wallets(
+          id BIGSERIAL PRIMARY KEY, label TEXT NOT NULL, network TEXT NOT NULL,
+          address TEXT NOT NULL, asset TEXT NOT NULL DEFAULT 'USDT',
+          created_by TEXT NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          UNIQUE(network,address,asset))""")
+        conn.execute("""CREATE TABLE IF NOT EXISTS crypto_transactions(
+          id BIGSERIAL PRIMARY KEY, wallet_id BIGINT NOT NULL, tx_hash TEXT,
+          direction TEXT NOT NULL, asset TEXT NOT NULL, amount TEXT NOT NULL,
+          status TEXT NOT NULL DEFAULT 'recorded', note TEXT,
+          created_by TEXT NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          CHECK (direction IN ('in','out')))""")
+    else:
+        conn.execute("""CREATE TABLE IF NOT EXISTS money_accounts(
+          id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, currency TEXT NOT NULL,
+          created_at TEXT NOT NULL, UNIQUE(name,currency))""")
+        conn.execute("""CREATE TABLE IF NOT EXISTS money_transactions(
+          id INTEGER PRIMARY KEY AUTOINCREMENT, account_id INTEGER NOT NULL, kind TEXT NOT NULL,
+          amount TEXT NOT NULL, description TEXT, reference TEXT,
+          created_by TEXT NOT NULL, created_at TEXT NOT NULL,
+          CHECK (kind IN ('credit','debit')))""")
+        conn.execute("""CREATE TABLE IF NOT EXISTS crypto_wallets(
+          id INTEGER PRIMARY KEY AUTOINCREMENT, label TEXT NOT NULL, network TEXT NOT NULL,
+          address TEXT NOT NULL, asset TEXT NOT NULL DEFAULT 'USDT',
+          created_by TEXT NOT NULL, created_at TEXT NOT NULL,
+          UNIQUE(network,address,asset))""")
+        conn.execute("""CREATE TABLE IF NOT EXISTS crypto_transactions(
+          id INTEGER PRIMARY KEY AUTOINCREMENT, wallet_id INTEGER NOT NULL, tx_hash TEXT,
+          direction TEXT NOT NULL, asset TEXT NOT NULL, amount TEXT NOT NULL,
+          status TEXT NOT NULL DEFAULT 'recorded', note TEXT,
+          created_by TEXT NOT NULL, created_at TEXT NOT NULL,
+          CHECK (direction IN ('in','out')))""")
+
+def list_money_accounts():
+    from decimal import Decimal
+    conn=db(); pg=is_pg(conn); rs=conn.execute("SELECT * FROM money_accounts ORDER BY id").fetchall()
+    result=[]
+    for a in rs:
+        p="%s" if pg else "?"
+        txs=conn.execute("SELECT kind,amount FROM money_transactions WHERE account_id="+p,(a["id"],)).fetchall()
+        balance=Decimal("0")
+        for t in txs:
+            value=Decimal(str(t["amount"]))
+            balance += value if t["kind"]=="credit" else -value
+        item=row(a); item["balance"]=format(balance,"f"); result.append(item)
+    conn.close(); return result
+
+def create_money_account(name,currency="EUR"):
+    name=str(name or "").strip()[:120]
+    currency=str(currency or "").strip().upper()[:12]
+    if not name or not re.fullmatch(r"[A-Z0-9]{3,12}",currency): raise ValueError("invalid account or currency")
+    conn=db(); pg=is_pg(conn); p="%s" if pg else "?"
+    try:
+        if pg:
+            conn.execute("INSERT INTO money_accounts(name,currency) VALUES(%s,%s)",(name,currency))
+        else:
+            conn.execute("INSERT INTO money_accounts(name,currency,created_at) VALUES(?,?,datetime('now'))",(name,currency))
+        conn.commit()
+    except Exception as exc:
+        conn.close(); raise ValueError("account already exists") from exc
+    conn.close(); return True
+
+def record_money_transaction(account_id,kind,amount,description="",reference="",created_by="system"):
+    if kind not in {"credit","debit"}: raise ValueError("invalid transaction type")
+    amount=_money_amount(amount); description=str(description or "").strip()[:500]; reference=str(reference or "").strip()[:160]
+    conn=db(); pg=is_pg(conn); p="%s" if pg else "?"
+    account=conn.execute("SELECT id FROM money_accounts WHERE id="+p,(int(account_id),)).fetchone()
+    if not account: conn.close(); raise ValueError("account not found")
+    if kind=="debit":
+        from decimal import Decimal
+        txs=conn.execute("SELECT kind,amount FROM money_transactions WHERE account_id="+p,(int(account_id),)).fetchall()
+        balance=sum((Decimal(str(t["amount"])) if t["kind"]=="credit" else -Decimal(str(t["amount"])) for t in txs),Decimal("0"))
+        if balance < Decimal(amount): conn.close(); raise ValueError("insufficient account balance")
+    if pg:
+        conn.execute("INSERT INTO money_transactions(account_id,kind,amount,description,reference,created_by) VALUES(%s,%s,%s,%s,%s,%s)",(int(account_id),kind,amount,description or None,reference or None,created_by))
+    else:
+        conn.execute("INSERT INTO money_transactions(account_id,kind,amount,description,reference,created_by,created_at) VALUES(?,?,?,?,?,?,datetime('now'))",(int(account_id),kind,amount,description or None,reference or None,created_by))
+    conn.commit(); conn.close(); return True
+
+def list_money_transactions(account_id=None,limit=100):
+    limit=min(max(int(limit),1),100); conn=db(); pg=is_pg(conn); p="%s" if pg else "?"
+    if account_id:
+        rs=conn.execute(f"SELECT * FROM money_transactions WHERE account_id={p} ORDER BY id DESC LIMIT {limit}",(int(account_id),)).fetchall()
+    else:
+        rs=conn.execute(f"SELECT * FROM money_transactions ORDER BY id DESC LIMIT {limit}").fetchall()
+    conn.close(); return [row(x) for x in rs]
+
+def _wallet_address_ok(network,address):
+    address=str(address or "").strip()
+    if network=="ethereum" or network=="bsc":
+        return bool(re.fullmatch(r"0x[a-fA-F0-9]{40}",address))
+    if network=="tron":
+        return bool(re.fullmatch(r"T[1-9A-HJ-NP-Za-km-z]{33}",address))
+    raise ValueError("unsupported network; use ethereum, bsc or tron")
+
+def list_crypto_wallets():
+    conn=db(); rs=conn.execute("SELECT * FROM crypto_wallets ORDER BY id DESC").fetchall(); conn.close(); return [row(x) for x in rs]
+
+def add_crypto_wallet(label,network,address,created_by):
+    label=str(label or "").strip()[:120]; network=str(network or "").strip().lower(); address=str(address or "").strip()
+    if not label: raise ValueError("wallet label is required")
+    if network not in {"ethereum","bsc","tron"}: raise ValueError("unsupported network")
+    if not _wallet_address_ok(network,address): raise ValueError("invalid wallet address")
+    conn=db(); pg=is_pg(conn)
+    try:
+        if pg: conn.execute("INSERT INTO crypto_wallets(label,network,address,created_by) VALUES(%s,%s,%s,%s)",(label,network,address,created_by))
+        else: conn.execute("INSERT INTO crypto_wallets(label,network,address,created_by,created_at) VALUES(?,?,?,?,datetime('now'))",(label,network,address,created_by))
+        conn.commit()
+    except Exception as exc:
+        conn.close(); raise ValueError("wallet already exists") from exc
+    conn.close(); return True
+
+def list_crypto_transactions(wallet_id=None,limit=100):
+    limit=min(max(int(limit),1),100); conn=db(); pg=is_pg(conn); p="%s" if pg else "?"
+    if wallet_id:
+        rs=conn.execute(f"SELECT * FROM crypto_transactions WHERE wallet_id={p} ORDER BY id DESC LIMIT {limit}",(int(wallet_id),)).fetchall()
+    else:
+        rs=conn.execute(f"SELECT * FROM crypto_transactions ORDER BY id DESC LIMIT {limit}").fetchall()
+    conn.close(); return [row(x) for x in rs]
+
+def record_crypto_transaction(wallet_id,direction,amount,tx_hash="",note="",created_by="system"):
+    if direction not in {"in","out"}: raise ValueError("invalid crypto direction")
+    amount=_money_amount(amount); tx_hash=str(tx_hash or "").strip()[:128]; note=str(note or "").strip()[:500]
+    conn=db(); pg=is_pg(conn); p="%s" if pg else "?"
+    wallet=conn.execute("SELECT id FROM crypto_wallets WHERE id="+p,(int(wallet_id),)).fetchone()
+    if not wallet: conn.close(); raise ValueError("wallet not found")
+    if pg: conn.execute("INSERT INTO crypto_transactions(wallet_id,direction,asset,amount,tx_hash,note,created_by) VALUES(%s,%s,'USDT',%s,%s,%s,%s)",(int(wallet_id),direction,amount,tx_hash or None,note or None,created_by))
+    else: conn.execute("INSERT INTO crypto_transactions(wallet_id,direction,asset,amount,tx_hash,note,created_by,created_at) VALUES(?,?,?,?,?,?,?,datetime('now'))",(int(wallet_id),direction,"USDT",amount,tx_hash or None,note or None,created_by))
+    conn.commit(); conn.close(); return True
+
+def crypto_wallet_balances():
+    from decimal import Decimal
+    wallets=list_crypto_wallets()
+    for w in wallets:
+        txs=list_crypto_transactions(w["id"])
+        balance=sum((Decimal(str(t["amount"])) if t["direction"]=="in" else -Decimal(str(t["amount"])) for t in txs),Decimal("0"))
+        w["balance"]=format(balance,"f")
+    return wallets
+
 def stats():
     conn=db(); pg=is_pg(conn); p="%s" if pg else "?"
     def scalar(sql, params=()):
@@ -662,6 +822,20 @@ class Handler(BaseHTTPRequestHandler):
         if path=="/api/stats":
             if not self.require(): return
             return self.send_json(stats())
+        if path=="/api/finance/accounts":
+            if not self.require(): return
+            return self.send_json({"accounts":list_money_accounts(),"transactions":list_money_transactions()})
+        if path=="/api/finance/transactions":
+            if not self.require(): return
+            account_id=parse_qs(urlparse(self.path).query).get("account_id",[None])[0]
+            return self.send_json({"transactions":list_money_transactions(account_id)})
+        if path=="/api/crypto/wallets":
+            if not self.require(): return
+            return self.send_json({"wallets":crypto_wallet_balances(),"transactions":list_crypto_transactions()})
+        if path=="/api/crypto/transactions":
+            if not self.require(): return
+            wallet_id=parse_qs(urlparse(self.path).query).get("wallet_id",[None])[0]
+            return self.send_json({"transactions":list_crypto_transactions(wallet_id)})
         if path=="/api/notifications":
             s=self.require()
             if not s: return
@@ -704,6 +878,30 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 p=self.body(); create_operator(p.get("email"),p.get("password"),p.get("role"))
             except ValueError as e: return self.send_json({"error":str(e)},400)
+            return self.send_json({"ok":True},201)
+        if path=="/api/finance/accounts":
+            s=self.require("write")
+            if not s: return
+            try: create_money_account(p.get("name"),p.get("currency","EUR"))
+            except ValueError as e: return self.send_json({"error":str(e)},400)
+            return self.send_json({"ok":True},201)
+        if path=="/api/finance/transactions":
+            s=self.require("write")
+            if not s: return
+            try: record_money_transaction(p.get("account_id"),p.get("kind"),p.get("amount"),p.get("description"),p.get("reference"),s["email"])
+            except (ValueError,TypeError) as e: return self.send_json({"error":str(e)},400)
+            return self.send_json({"ok":True},201)
+        if path=="/api/crypto/wallets":
+            s=self.require("write")
+            if not s: return
+            try: add_crypto_wallet(p.get("label"),p.get("network"),p.get("address"),s["email"])
+            except ValueError as e: return self.send_json({"error":str(e)},400)
+            return self.send_json({"ok":True},201)
+        if path=="/api/crypto/transactions":
+            s=self.require("write")
+            if not s: return
+            try: record_crypto_transaction(p.get("wallet_id"),p.get("direction"),p.get("amount"),p.get("tx_hash"),p.get("note"),s["email"])
+            except (ValueError,TypeError) as e: return self.send_json({"error":str(e)},400)
             return self.send_json({"ok":True},201)
         if path=="/api/logout":
             token=session_token(self.headers); SESSIONS.pop(token,None)
