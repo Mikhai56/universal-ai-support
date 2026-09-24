@@ -358,7 +358,15 @@ def update_ticket(tid, fields, actor="system"):
         if not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+",email): raise ValueError("invalid customer email")
         fields["customer_email"]=email
     if "customer_name" in fields: fields["customer_name"]=str(fields["customer_name"])[:120]
-    if "assignee" in fields: fields["assignee"]=str(fields["assignee"])[:120]
+    if "assignee" in fields:
+        fields["assignee"]=str(fields["assignee"]).strip().lower()[:254]
+        if fields["assignee"]:
+            check=db()
+            try:
+                exists=check.execute("SELECT email FROM operators WHERE email="+("%s" if is_pg(check) else "?"),(fields["assignee"],)).fetchone()
+            finally:
+                check.close()
+            if not exists: raise ValueError("assignee must be an existing operator email")
     conn=db(); pg=is_pg(conn)
     ticket=conn.execute("SELECT status,priority,assignee FROM tickets WHERE id="+("%s" if pg else "?"),(tid,)).fetchone()
     if not ticket:
@@ -444,19 +452,24 @@ def list_customers(search=None, limit=200):
 
 def stats():
     conn=db(); pg=is_pg(conn); p="%s" if pg else "?"
-    def count(where="", params=()):
-        sql="SELECT COUNT(*) AS n FROM tickets"+((" WHERE "+where) if where else "")
+    def scalar(sql, params=()):
         return int(conn.execute(sql,tuple(params)).fetchone()["n"])
-    total=count()
-    answered=count("status="+p,("answered",))
-    escalated=count("status="+p,("escalated",))
-    open_count=count("status IN ('escalated','needs_clarification','open')")
-    resolved=count("status="+p,("resolved",))
-    conversations=int(conn.execute("SELECT COUNT(*) AS n FROM conversations").fetchone()["n"])
-    messages=int(conn.execute("SELECT COUNT(*) AS n FROM messages").fetchone()["n"])
+    total=scalar("SELECT COUNT(*) AS n FROM tickets")
+    answered=scalar("SELECT COUNT(*) AS n FROM tickets WHERE status="+p,("answered",))
+    escalated=scalar("SELECT COUNT(*) AS n FROM tickets WHERE status="+p,("escalated",))
+    open_count=scalar("SELECT COUNT(*) AS n FROM tickets WHERE status IN ('escalated','needs_clarification','open')")
+    resolved=scalar("SELECT COUNT(*) AS n FROM tickets WHERE status="+p,("resolved",))
+    conversations=scalar("SELECT COUNT(*) AS n FROM conversations")
+    messages=scalar("SELECT COUNT(*) AS n FROM messages")
+    operators=scalar("SELECT COUNT(*) AS n FROM operators")
+    unassigned=scalar("SELECT COUNT(*) AS n FROM tickets WHERE status IN ('escalated','needs_clarification','open') AND (assignee IS NULL OR assignee='')")
+    unread=scalar("SELECT COUNT(*) AS n FROM notifications WHERE read_at IS NULL")
+    try: leads=scalar("SELECT COUNT(*) AS n FROM leads")
+    except Exception: leads=0
     conn.close()
     return {"total":total,"answered":answered,"escalated":escalated,"open":open_count,
-            "resolved":resolved,"conversations":conversations,"messages":messages}
+            "resolved":resolved,"conversations":conversations,"messages":messages,
+            "operators":operators,"unassigned":unassigned,"leads":leads,"unread_notifications":unread}
 
 def create_notification(kind,title,body="",ticket_id=None,recipient=None,conn=None):
     """Create a notification. Broadcasts are materialized per operator so read state is private."""
