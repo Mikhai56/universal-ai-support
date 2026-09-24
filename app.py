@@ -17,7 +17,7 @@ ADMIN_EMAIL = os.getenv("ADMIN_EMAIL", "admin@supportpilot.local")
 ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "")
 OPERATORS_JSON = os.getenv("OPERATORS_JSON", "")
 MAX_MESSAGE_CHARS = min(max(int(os.getenv("MAX_MESSAGE_CHARS", "4096")), 128), 16384)
-TOKEN_TTL = 60 * 60 * 12
+TOKEN_TTL = 60 * 60 * 12\nPASSWORD_MIN_LENGTH = 12\n\ndef validate_password(password):\n    password=str(password or "")\n    if not PASSWORD_MIN_LENGTH <= len(password) <= 256:\n        raise ValueError("password must be 12-256 characters")\n    if not re.search(r"[A-Z]", password) or not re.search(r"[a-z]", password) or not re.search(r"\\d", password):\n        raise ValueError("password must include uppercase, lowercase, and a digit")\n    return password
 SESSION_COOKIE_NAME = "sp_session"
 SECURE_COOKIES = os.getenv("SECURE_COOKIES", "0").strip().lower() in {"1", "true", "yes", "on"}
 
@@ -79,7 +79,7 @@ def list_operators():
 def create_operator(email,password,role):
     email=str(email or "").strip().lower(); password=str(password or "")
     if not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+",email): raise ValueError("invalid operator email")
-    if len(password)<8 or len(password)>256: raise ValueError("password must be 8-256 characters")
+    validate_password(password)
     if role not in ROLE_PERMISSIONS: raise ValueError("invalid operator role")
     conn=db(); exists=conn.execute("SELECT email FROM operators WHERE email="+("%s" if is_pg(conn) else "?"),(email,)).fetchone()
     if exists: conn.close(); raise ValueError("operator already exists")
@@ -92,7 +92,7 @@ def update_operator(email,fields):
     email=str(email or "").strip().lower(); fields={k:v for k,v in (fields or {}).items() if k in {"role","password"}}
     if not fields: return False
     if "role" in fields and fields["role"] not in ROLE_PERMISSIONS: raise ValueError("invalid operator role")
-    if "password" in fields and not 8<=len(str(fields["password"]))<=256: raise ValueError("password must be 8-256 characters")
+    if "password" in fields: validate_password(fields["password"])
     conn=db(); op=conn.execute("SELECT email,role FROM operators WHERE email="+("%s" if is_pg(conn) else "?"),(email,)).fetchone()
     if not op: conn.close(); return False
     old_role=op["role"]
