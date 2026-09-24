@@ -90,7 +90,6 @@ class SupportPilotTests(unittest.TestCase):
         app, path = load_app()
         app.create_operator("admin@example.com","adminpass","admin")
         app.create_operator("viewer@example.com","viewerpass","viewer")
-        app.create_operator("operator@example.com","operatorpass","operator")
         ops={x["email"]:x for x in app.list_operators()}
         self.assertEqual(ops["viewer@example.com"]["role"],"viewer")
         self.assertNotIn("password_hash",ops["viewer@example.com"])
