@@ -38,6 +38,7 @@ class SupportPilotTests(unittest.TestCase):
 
     def test_ticket_detail_and_validation(self):
         app, path = load_app()
+        app.create_operator("operator@example.com", "operatorpass", "operator")
         result = app.answer_question("Как оформить возврат?")
         tid = result["ticket_id"]
         ticket = app.get_ticket(tid)
