@@ -31,7 +31,7 @@ async function loadOperators(){if(currentUser?.role!=='admin')return;try{let d=a
 async function changeOperatorRole(email,role){try{await api('/api/operators/'+email,{method:'PATCH',body:JSON.stringify({role})});loadOperators()}catch(e){alert(e.message);loadOperators()}}
 async function removeOperator(email){if(!confirm('Удалить оператора?'))return;try{await api('/api/operators/'+email,{method:'DELETE'});loadOperators()}catch(e){alert(e.message);loadOperators()}}
 $('operatorForm').onsubmit=async e=>{e.preventDefault();try{await api('/api/operators',{method:'POST',body:JSON.stringify({email:$('operatorEmail').value,password:$('operatorPassword').value,role:$('operatorRole').value})});e.target.reset();loadOperators()}catch(x){alert(x.message)}};
-function logout(){if(token)api('/api/logout',{method:'POST'}).catch(()=>{});currentUser=null;showLogin()}
+function logout(){api('/api/logout',{method:'POST'}).catch(()=>{}).finally(()=>{currentUser=null;conversationId='';sessionStorage.removeItem('supportpilot_conversation_id');showLogin()})}
 async function boot(){try{let h=await fetch('/api/health').then(r=>r.json());if(h.auth){try{await api('/api/me');showApp();loadAll()}catch(e){showLogin()}}else{showApp();loadAll()}}catch(e){showLogin()}}
 async function login(e){e.preventDefault();$('loginError').textContent='';try{let d=await fetch('/api/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({email:$('email').value,password:$('password').value})}).then(async r=>{let x=await r.json();if(!r.ok)throw Error(x.error);return x});showApp();loadAll()}catch(x){$('loginError').textContent=x.message}}
 $('loginForm').onsubmit=login;
