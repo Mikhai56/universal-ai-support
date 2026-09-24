@@ -147,6 +147,38 @@ class SupportPilotTests(unittest.TestCase):
             app.SECURE_COOKIES = previous
             os.unlink(path)
 
+    def test_conversation_persistence_and_redaction(self):
+        app, path = load_app()
+        first = app.answer_question("Как оформить возврат?", name="Анна", email="anna@example.com")
+        self.assertRegex(first["conversation_id"], r"^[a-f0-9]{32}$")
+        second = app.answer_question("Вот данные карты 4111 1111 1111 1111", name="Анна", email="anna@example.com", conversation_id=first["conversation_id"])
+        self.assertEqual(second["conversation_id"], first["conversation_id"])
+        messages = app.list_messages(first["conversation_id"])
+        self.assertGreaterEqual(len(messages), 3)
+        self.assertNotIn("4111", " ".join(m["content"] for m in messages))
+        self.assertTrue(any(m["role"] == "assistant" for m in messages))
+        os.unlink(path)
+
+    def test_lead_search(self):
+        app, path = load_app()
+        from lead_pipeline import create_lead, list_leads
+        create_lead({"name":"Анна Петрова","email":"anna@example.com","company":"Acme","message":"Нужна интеграция"})
+        create_lead({"name":"Иван","email":"ivan@example.com","company":"Other","message":"Консультация"})
+        self.assertEqual(len(list_leads(search="anna@example.com")), 1)
+        self.assertEqual(len(list_leads(search="Acme")), 1)
+        self.assertEqual(len(list_leads(search="интеграция")), 1)
+        self.assertEqual(len(list_leads(search="nobody")), 0)
+        os.unlink(path)
+
+    def test_stats_include_conversations_and_messages(self):
+        app, path = load_app()
+        app.answer_question("Как оформить возврат?")
+        s = app.stats()
+        self.assertGreaterEqual(s["conversations"], 1)
+        self.assertGreaterEqual(s["messages"], 2)
+        self.assertGreaterEqual(s["total"], 0)
+        os.unlink(path)
+
     def test_operator_password_hash_and_roles(self):
         app, path = load_app()
         self.assertTrue(app.verify_password("secret", app.hash_password("secret")))
