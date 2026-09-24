@@ -247,9 +247,34 @@ def ai_answer(question):
     except Exception as exc:
         print(f"AI request failed: {exc}",flush=True); return None
 
-def answer_question(question, name="", email=""):
+def save_message(conversation_id, role, content, status="", ticket_id=None):
+    conn=db(); pg=is_pg(conn); content=redact_sensitive(str(content))[:MAX_MESSAGE_CHARS]
+    if pg: conn.execute("INSERT INTO messages(conversation_id,role,content,status,ticket_id) VALUES(%s,%s,%s,%s,%s)",(conversation_id,role,content,status,ticket_id))
+    else: conn.execute("INSERT INTO messages(conversation_id,role,content,status,ticket_id,created_at) VALUES(?,?,?,?,?,datetime('now'))",(conversation_id,role,content,status,ticket_id))
+    conn.commit(); conn.close()
+
+def ensure_conversation(name="", email="", conversation_id=""):
+    cid=str(conversation_id or "").strip()
+    if not re.fullmatch(r"[a-f0-9]{32}",cid): cid=secrets.token_hex(16)
+    name=str(name or "").strip()[:120]; email=str(email or "").strip().lower()[:254]
+    conn=db(); pg=is_pg(conn); p="%s" if pg else "?"
+    found=conn.execute("SELECT id FROM conversations WHERE id="+p,(cid,)).fetchone()
+    if found:
+        conn.execute("UPDATE conversations SET customer_name="+p+", customer_email="+p+", updated_at="+("NOW()" if pg else "datetime('now')")+" WHERE id="+p,(name or None,email or None,cid))
+    elif pg: conn.execute("INSERT INTO conversations(id,customer_name,customer_email) VALUES(%s,%s,%s)",(cid,name or None,email or None))
+    else: conn.execute("INSERT INTO conversations(id,customer_name,customer_email,created_at,updated_at) VALUES(?,?,?,?,?)",(cid,name or None,email or None,time.strftime("%Y-%m-%d %H:%M:%S"),time.strftime("%Y-%m-%d %H:%M:%S")))
+    conn.commit(); conn.close(); return cid
+
+def list_messages(conversation_id, limit=100):
+    limit=min(max(int(limit),1),100); conn=db(); pg=is_pg(conn); p="%s" if pg else "?"
+    rs=conn.execute(f"SELECT * FROM messages WHERE conversation_id={p} ORDER BY id ASC LIMIT {p}",(conversation_id,limit)).fetchall()
+    conn.close(); return [row(x) for x in rs]
+
+def answer_question(question, name="", email="", conversation_id=""):
     question=redact_sensitive((question or "").strip())[:MAX_MESSAGE_CHARS]
     if not question: return {"answer":"Напишите вопрос одним сообщением.","status":"needs_clarification"}
+    conversation_id=ensure_conversation(name,email,conversation_id)
+    save_message(conversation_id,"user",question,"received")
     reason=risky(question)
     if reason:
         answer="Я передал обращение специалисту, чтобы не дать неточный или небезопасный ответ. Не отправляйте пароли и полные реквизиты карты."
