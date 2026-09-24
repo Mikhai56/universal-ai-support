@@ -311,7 +311,7 @@ def answer_question(question, name="", email="", conversation_id=""):
 def row(r):
     return dict(r)
 
-def list_tickets(status=None, priority=None, search=None, limit=100):
+def list_tickets(status=None, priority=None, search=None, assignee=None, limit=100):
     if status is not None and status not in TICKET_STATUSES:
         raise ValueError("invalid ticket status")
     if priority is not None and priority not in TICKET_PRIORITIES:
