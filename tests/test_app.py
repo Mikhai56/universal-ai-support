@@ -230,6 +230,37 @@ class SupportPilotTests(unittest.TestCase):
         self.assertTrue(app.verify_password("Strongpass1234", app.db().execute("SELECT password_hash FROM operators WHERE email=?", ("strong@example.com",)).fetchone()["password_hash"]))
         os.unlink(path)
 
+
+    def test_financial_ledger_and_usdt_wallet(self):
+        app, path = load_app()
+        app.create_operator("finance@example.com", "Financepass1234", "operator")
+        self.assertTrue(app.create_money_account("Основной счёт", "EUR"))
+        accounts = app.list_money_accounts()
+        self.assertEqual(accounts[0]["balance"], "0.000000")
+        self.assertTrue(app.record_money_transaction(accounts[0]["id"], "credit", "125.50", "Пополнение", created_by="finance@example.com"))
+        self.assertEqual(app.list_money_accounts()[0]["balance"], "125.500000")
+        with self.assertRaises(ValueError):
+            app.record_money_transaction(accounts[0]["id"], "debit", "200", created_by="finance@example.com")
+        self.assertTrue(app.record_money_transaction(accounts[0]["id"], "debit", "25.50", "Расход", created_by="finance@example.com"))
+        self.assertEqual(app.list_money_accounts()[0]["balance"], "100.000000")
+        self.assertTrue(app.add_crypto_wallet("Мой USDT", "ethereum", "0x1111111111111111111111111111111111111111", "finance@example.com"))
+        wallet = app.crypto_wallet_balances()[0]
+        self.assertEqual(wallet["balance"], "0")
+        self.assertTrue(app.record_crypto_transaction(wallet["id"], "in", "50", "0xabc123", "Пополнение", "finance@example.com"))
+        self.assertEqual(app.crypto_wallet_balances()[0]["balance"], "50.000000")
+        with self.assertRaises(ValueError):
+            app.add_crypto_wallet("Bad", "ethereum", "not-an-address", "finance@example.com")
+        os.unlink(path)
+
+    def test_unassigned_ticket_filter(self):
+        app, path = load_app()
+        app.create_operator("operator@example.com", "Operatorpass1234", "operator")
+        first=app.create_ticket("Без назначения", "Ответ", "open")
+        second=app.create_ticket("Назначено", "Ответ", "open")
+        app.update_ticket(second, {"assignee":"operator@example.com"})
+        self.assertEqual([x["id"] for x in app.list_tickets(unassigned=True)], [first])
+        os.unlink(path)
+
     def test_operator_password_hash_and_roles(self):
         app, path = load_app()
         self.assertTrue(app.verify_password("secret", app.hash_password("secret")))
