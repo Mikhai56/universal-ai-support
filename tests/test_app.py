@@ -38,7 +38,7 @@ class SupportPilotTests(unittest.TestCase):
 
     def test_ticket_detail_and_validation(self):
         app, path = load_app()
-        app.create_operator("operator@example.com", "operatorpass", "operator")
+        app.create_operator("operator@example.com", "Operatorpass1234", "operator")
         result = app.answer_question("Как оформить возврат?")
         tid = result["ticket_id"]
         ticket = app.get_ticket(tid)
@@ -89,17 +89,17 @@ class SupportPilotTests(unittest.TestCase):
 
     def test_operator_management_and_last_admin_protection(self):
         app, path = load_app()
-        app.create_operator("admin@example.com","adminpass","admin")
-        app.create_operator("operator@example.com","operatorpass","operator")
-        app.create_operator("viewer@example.com","viewerpass","viewer")
+        app.create_operator("admin@example.com","Adminpass1234","admin")
+        app.create_operator("operator@example.com","Operatorpass1234","operator")
+        app.create_operator("viewer@example.com","Viewerpass1234","viewer")
         ops={x["email"]:x for x in app.list_operators()}
         self.assertEqual(ops["viewer@example.com"]["role"],"viewer")
         self.assertNotIn("password_hash",ops["viewer@example.com"])
-        self.assertTrue(app.update_operator("viewer@example.com",{"role":"operator","password":"newviewerpass"}))
+        self.assertTrue(app.update_operator("viewer@example.com",{"role":"operator","password":"Newviewerpass1234"}))
         conn=app.db()
         stored=conn.execute("SELECT password_hash FROM operators WHERE email=?", ("viewer@example.com",)).fetchone()["password_hash"]
         conn.close()
-        self.assertTrue(app.verify_password("newviewerpass", stored))
+        self.assertTrue(app.verify_password("Newviewerpass1234", stored))
         self.assertTrue(app.delete_operator("operator@example.com"))
         with self.assertRaises(ValueError):
             app.delete_operator("admin@example.com")
@@ -109,9 +109,9 @@ class SupportPilotTests(unittest.TestCase):
 
     def test_auth_permissions_and_expiry(self):
         app, path = load_app()
-        app.create_operator("admin@example.com", "adminpass", "admin")
-        app.create_operator("operator@example.com", "operatorpass", "operator")
-        app.create_operator("viewer@example.com", "viewerpass", "viewer")
+        app.create_operator("admin@example.com", "Adminpass1234", "admin")
+        app.create_operator("operator@example.com", "Operatorpass1234", "operator")
+        app.create_operator("viewer@example.com", "Viewerpass1234", "viewer")
         tokens = {role: app.make_token(role+"@example.com", role) for role in ("admin", "operator", "viewer")}
         for role, tok in tokens.items():
             headers = {"Authorization": "Bearer " + tok}
@@ -182,8 +182,8 @@ class SupportPilotTests(unittest.TestCase):
 
     def test_notifications_are_private_per_operator(self):
         app, path = load_app()
-        app.create_operator("one@example.com", "onepass123", "operator")
-        app.create_operator("two@example.com", "twopass123", "operator")
+        app.create_operator("one@example.com", "Onepass123456", "operator")
+        app.create_operator("two@example.com", "Twopass123456", "operator")
         tid = app.create_ticket("Нужна помощь", "Передано оператору", "escalated", "платёжный инцидент")
         one = app.list_notifications("one@example.com")
         two = app.list_notifications("two@example.com")
@@ -201,7 +201,7 @@ class SupportPilotTests(unittest.TestCase):
 
     def test_ticket_assignment_requires_existing_operator(self):
         app, path = load_app()
-        app.create_operator("operator@example.com", "operatorpass", "operator")
+        app.create_operator("operator@example.com", "Operatorpass1234", "operator")
         tid = app.create_ticket("Нужна помощь", "Ответ", "open")
         with self.assertRaises(ValueError):
             app.update_ticket(tid, {"assignee": "missing@example.com"})
@@ -211,13 +211,23 @@ class SupportPilotTests(unittest.TestCase):
 
     def test_stats_include_operational_counts(self):
         app, path = load_app()
-        app.create_operator("operator@example.com", "operatorpass", "operator")
+        app.create_operator("operator@example.com", "Operatorpass1234", "operator")
         app.create_ticket("Открыто", "Ответ", "open")
         app.create_ticket("Эскалация", "Передано", "escalated", "платёжный инцидент")
         s = app.stats()
         self.assertEqual(s["operators"], 1)
         self.assertGreaterEqual(s["unassigned"], 2)
         self.assertGreaterEqual(s["unread_notifications"], 1)
+        os.unlink(path)
+
+    def test_password_policy(self):
+        app, path = load_app()
+        with self.assertRaises(ValueError):
+            app.create_operator("weak@example.com", "short", "operator")
+        with self.assertRaises(ValueError):
+            app.create_operator("weak2@example.com", "longpasswordonly", "operator")
+        self.assertTrue(app.create_operator("strong@example.com", "Strongpass1234", "operator"))
+        self.assertTrue(app.verify_password("Strongpass1234", app.db().execute("SELECT password_hash FROM operators WHERE email=?", ("strong@example.com",)).fetchone()["password_hash"]))
         os.unlink(path)
 
     def test_operator_password_hash_and_roles(self):
