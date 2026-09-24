@@ -70,13 +70,18 @@ def create_lead(data):
     conn.commit(); conn.close()
     return lead_id
 
-def list_leads(status=None, limit=100):
-    conn=db()
-    limit=min(max(int(limit),1),100)
-    if is_pg(conn):
-        rs=conn.execute("SELECT * FROM leads WHERE status=%s ORDER BY created_at DESC LIMIT %s",(status,limit)).fetchall() if status else conn.execute("SELECT * FROM leads ORDER BY created_at DESC LIMIT %s",(limit,)).fetchall()
-    else:
-        rs=conn.execute("SELECT * FROM leads WHERE status=? ORDER BY created_at DESC LIMIT ?",(status,limit)).fetchall() if status else conn.execute("SELECT * FROM leads ORDER BY created_at DESC LIMIT ?",(limit,)).fetchall()
+def list_leads(status=None, search=None, limit=100):
+    conn=db(); pg=is_pg(conn); limit=min(max(int(limit),1),100)
+    search=str(search or "").strip()[:120]; p="%s" if pg else "?"
+    clauses=[]; vals=[]
+    if status: clauses.append("status="+p); vals.append(status)
+    if search:
+        term="%"+search+"%"
+        clauses.append("(name LIKE "+p+" OR email LIKE "+p+" OR company LIKE "+p+" OR message LIKE "+p+")")
+        vals.extend([term]*4)
+    where=(" WHERE "+" AND ".join(clauses)) if clauses else ""
+    vals.append(limit)
+    rs=conn.execute(f"SELECT * FROM leads{where} ORDER BY created_at DESC LIMIT {p}",tuple(vals)).fetchall()
     conn.close(); return [dict(x) for x in rs]
 
 def get_lead(lead_id):
