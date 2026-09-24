@@ -130,6 +130,23 @@ class SupportPilotTests(unittest.TestCase):
         self.assertEqual(events[0]["actor"], "operator@example.com")
         os.unlink(path)
 
+    def test_session_cookie_security_flags(self):
+        app, path = load_app()
+        previous = app.SECURE_COOKIES
+        try:
+            app.SECURE_COOKIES = True
+            cookie = app.session_cookie("abc123")
+            self.assertIn("HttpOnly", cookie)
+            self.assertIn("Secure", cookie)
+            self.assertIn("SameSite=Lax", cookie)
+            self.assertIn("Max-Age=43200", cookie)
+            cleared = app.clear_session_cookie()
+            self.assertIn("Max-Age=0", cleared)
+            self.assertIn("Secure", cleared)
+        finally:
+            app.SECURE_COOKIES = previous
+            os.unlink(path)
+
     def test_operator_password_hash_and_roles(self):
         app, path = load_app()
         self.assertTrue(app.verify_password("secret", app.hash_password("secret")))
