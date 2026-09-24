@@ -490,12 +490,14 @@ class Handler(BaseHTTPRequestHandler):
         if path=="/api/leads":
             if not self.require(): return
             from lead_pipeline import list_leads
-            status=parse_qs(urlparse(self.path).query).get("status",[None])[0]
+            params=parse_qs(urlparse(self.path).query)
+            status=params.get("status",[None])[0]
+            search=params.get("q",[""])[0]
             if status:
                 from lead_pipeline import LEAD_STATUSES
                 if status not in LEAD_STATUSES:
                     return self.send_json({"error":"invalid lead status"},400)
-            return self.send_json({"leads":list_leads(status=status)})
+            return self.send_json({"leads":list_leads(status=status,search=search)})
         if path.startswith("/api/leads/"):
             if not self.require(): return
             from lead_pipeline import get_lead, list_lead_events
