@@ -198,6 +198,27 @@ class SupportPilotTests(unittest.TestCase):
         self.assertFalse(app.mark_notification_read(n1["id"], "two@example.com"))
         os.unlink(path)
 
+    def test_ticket_assignment_requires_existing_operator(self):
+        app, path = load_app()
+        app.create_operator("operator@example.com", "operatorpass", "operator")
+        tid = app.create_ticket("Нужна помощь", "Ответ", "open")
+        with self.assertRaises(ValueError):
+            app.update_ticket(tid, {"assignee": "missing@example.com"})
+        self.assertTrue(app.update_ticket(tid, {"assignee": "operator@example.com"}))
+        self.assertEqual(app.get_ticket(tid)["assignee"], "operator@example.com")
+        os.unlink(path)
+
+    def test_stats_include_operational_counts(self):
+        app, path = load_app()
+        app.create_operator("operator@example.com", "operatorpass", "operator")
+        app.create_ticket("Открыто", "Ответ", "open")
+        app.create_ticket("Эскалация", "Передано", "escalated", "платёжный инцидент")
+        s = app.stats()
+        self.assertEqual(s["operators"], 1)
+        self.assertGreaterEqual(s["unassigned"], 2)
+        self.assertGreaterEqual(s["unread_notifications"], 2)
+        os.unlink(path)
+
     def test_operator_password_hash_and_roles(self):
         app, path = load_app()
         self.assertTrue(app.verify_password("secret", app.hash_password("secret")))
