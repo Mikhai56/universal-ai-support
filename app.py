@@ -68,6 +68,7 @@ def seed_operators(conn):
     for email,password,role in users:
         existing=conn.execute("SELECT email FROM operators WHERE email="+("%s" if is_pg(conn) else "?"),(email,)).fetchone()
         if existing: continue
+        validate_password(password)
         encoded=hash_password(password)
         if is_pg(conn): conn.execute("INSERT INTO operators(email,password_hash,role) VALUES(%s,%s,%s)",(email,encoded,role))
         else: conn.execute("INSERT INTO operators(email,password_hash,role,created_at) VALUES(?,?,?,datetime('now'))",(email,encoded,role))
@@ -535,6 +536,9 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("X-Content-Type-Options","nosniff")
         self.send_header("X-Frame-Options","DENY")
         self.send_header("Referrer-Policy","no-referrer")
+        self.send_header("Permissions-Policy","geolocation=(), camera=(), microphone=()")
+        if SECURE_COOKIES:
+            self.send_header("Strict-Transport-Security","max-age=31536000; includeSubDomains")
         self.send_header("Content-Security-Policy","default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'")
         if getattr(self,"_clear_session_cookie",False):
             self.send_header("Set-Cookie",clear_session_cookie())
