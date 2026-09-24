@@ -89,6 +89,7 @@ class SupportPilotTests(unittest.TestCase):
     def test_operator_management_and_last_admin_protection(self):
         app, path = load_app()
         app.create_operator("admin@example.com","adminpass","admin")
+        app.create_operator("operator@example.com","operatorpass","operator")
         app.create_operator("viewer@example.com","viewerpass","viewer")
         ops={x["email"]:x for x in app.list_operators()}
         self.assertEqual(ops["viewer@example.com"]["role"],"viewer")
