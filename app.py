@@ -459,23 +459,33 @@ def stats():
             "resolved":resolved,"conversations":conversations,"messages":messages}
 
 def create_notification(kind,title,body="",ticket_id=None,recipient=None,conn=None):
+    """Create a notification. Broadcasts are materialized per operator so read state is private."""
     own=conn is None
     if own: conn=db()
     pg=is_pg(conn)
-    if pg:
-        conn.execute("INSERT INTO notifications(recipient,kind,title,body,ticket_id) VALUES(%s,%s,%s,%s,%s)",(recipient,kind,str(title)[:200],str(body)[:2000],ticket_id))
-    else:
-        conn.execute("INSERT INTO notifications(recipient,kind,title,body,ticket_id,created_at) VALUES(?,?,?,?,?,datetime('now'))",(recipient,kind,str(title)[:200],str(body)[:2000],ticket_id))
+    recipients=[str(recipient).strip().lower()] if recipient else []
+    if not recipients:
+        rs=conn.execute("SELECT email FROM operators")
+        recipients=[str(x["email"]).strip().lower() for x in rs.fetchall()]
+    if not recipients:
+        recipients=[None]
+    for target in recipients:
+        if pg:
+            conn.execute("INSERT INTO notifications(recipient,kind,title,body,ticket_id) VALUES(%s,%s,%s,%s,%s)",(target,kind,str(title)[:200],str(body)[:2000],ticket_id))
+        else:
+            conn.execute("INSERT INTO notifications(recipient,kind,title,body,ticket_id,created_at) VALUES(?,?,?,?,?,datetime('now'))",(target,kind,str(title)[:200],str(body)[:2000],ticket_id))
     if own: conn.commit(); conn.close()
 
 def list_notifications(recipient,limit=50):
+    recipient=str(recipient or "").strip().lower()
     limit=min(max(int(limit),1),100); conn=db(); pg=is_pg(conn); p="%s" if pg else "?"
-    rs=conn.execute(f"SELECT * FROM notifications WHERE recipient IS NULL OR recipient={p} ORDER BY id DESC LIMIT {limit}",(recipient,)).fetchall()
+    rs=conn.execute(f"SELECT * FROM notifications WHERE recipient={p} ORDER BY id DESC LIMIT {limit}",(recipient,)).fetchall()
     conn.close(); return [row(x) for x in rs]
 
 def mark_notification_read(notification_id,recipient):
+    recipient=str(recipient or "").strip().lower()
     conn=db(); pg=is_pg(conn); p="%s" if pg else "?"
-    rs=conn.execute("UPDATE notifications SET read_at="+("NOW()" if pg else "datetime('now')")+" WHERE id="+p+" AND (recipient IS NULL OR recipient="+p+")",(notification_id,recipient))
+    rs=conn.execute("UPDATE notifications SET read_at="+("NOW()" if pg else "datetime('now')")+" WHERE id="+p+" AND recipient="+p,(notification_id,recipient))
     conn.commit(); changed=rs.rowcount; conn.close(); return bool(changed)
 
 def make_token(email,role):
