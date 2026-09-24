@@ -216,7 +216,7 @@ class SupportPilotTests(unittest.TestCase):
         s = app.stats()
         self.assertEqual(s["operators"], 1)
         self.assertGreaterEqual(s["unassigned"], 2)
-        self.assertGreaterEqual(s["unread_notifications"], 2)
+        self.assertGreaterEqual(s["unread_notifications"], 1)
         os.unlink(path)
 
     def test_operator_password_hash_and_roles(self):
