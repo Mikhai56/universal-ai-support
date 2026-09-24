@@ -387,7 +387,7 @@ def update_ticket(tid, fields, actor="system"):
         if after.get("assignee"):
             create_notification("assignment","Вам назначено обращение",f"Обращение #{tid}",tid,str(after["assignee"]).strip().lower(),conn=conn)
         if after.get("status") in ("escalated","open"):
-            create_notification("ticket","Обновлено обращение",f"Обращение #{tid}: статус {after.get("status")}",tid,conn=conn)
+            create_notification("ticket","Обновлено обращение",f"Обращение #{tid}: статус {after.get('status')}",tid,conn=conn)
     conn.commit(); conn.close()
     return True
 
