@@ -40,6 +40,9 @@ def clear_session_cookie():
 LEAD_RATE_WINDOW = 60
 LEAD_RATE_MAX = 10
 LEAD_RATE = {}
+CHAT_RATE_WINDOW = 60
+CHAT_RATE_MAX = 30
+CHAT_RATE = {}
 LOGIN_RATE_WINDOW = 300
 LOGIN_RATE_MAX = 8
 LOGIN_RATE = {}
@@ -538,6 +541,29 @@ class Handler(BaseHTTPRequestHandler):
         allowed={x.strip() for x in os.getenv("CORS_ORIGINS","").split(",") if x.strip()}
         origin=self.headers.get("Origin")
         return origin if origin and origin in allowed else None
+    def _csrf_ok(self):
+        """Allow same-origin browser mutations and explicitly configured CORS origins."""
+        origin=self.headers.get("Origin")
+        if origin:
+            allowed={x.strip() for x in os.getenv("CORS_ORIGINS","").split(",") if x.strip()}
+            if origin in allowed:
+                return True
+            try:
+                return origin == f"{urlparse(self.path).scheme or 'http'}://{self.headers.get('Host','')}"
+            except Exception:
+                return False
+        referer=self.headers.get("Referer")
+        if referer:
+            try:
+                return urlparse(referer).netloc == self.headers.get("Host","")
+            except Exception:
+                return False
+        return not SECURE_COOKIES
+    def _require_csrf(self):
+        if self._csrf_ok():
+            return True
+        self.send_json({"error":"cross-site request blocked"},403)
+        return False
     def send_json(self,payload,status=200):
         body=json.dumps(payload,ensure_ascii=False,default=str).encode()
         self.send_response(status); self.send_header("Content-Type","application/json; charset=utf-8")
@@ -647,6 +673,8 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         self._set_session_cookie=""
         path=urlparse(self.path).path
+        if path not in ("/api/login","/api/chat","/api/leads") and not self._require_csrf():
+            return
         try: p=self.body()
         except ValueError as e: return self.send_json({"error":str(e)},413 if "large" in str(e) else 400)
         if path=="/api/login":
@@ -680,6 +708,13 @@ class Handler(BaseHTTPRequestHandler):
             self._set_session_cookie=""
             return self.send_json({"ok":True})
         if path=="/api/chat":
+            now=time.time()
+            client=self.client_address[0]
+            recent=[t for t in CHAT_RATE.get(client,[]) if now-t < CHAT_RATE_WINDOW]
+            if len(recent) >= CHAT_RATE_MAX:
+                CHAT_RATE[client]=recent
+                return self.send_json({"error":"Слишком много сообщений. Попробуйте через минуту."},429)
+            CHAT_RATE[client]=recent+[now]
             result=answer_question(p.get("message",""),p.get("name",""),p.get("email",""),p.get("conversation_id","")); return self.send_json(result)
         if path=="/api/leads":
             now=time.time()
@@ -697,6 +732,8 @@ class Handler(BaseHTTPRequestHandler):
         self.send_json({"error":"not found"},404)
     def do_DELETE(self):
         path=urlparse(self.path).path
+        if not self._require_csrf():
+            return
         if path.startswith("/api/operators/"):
             if not self.require("manage"): return
             from urllib.parse import unquote
@@ -707,6 +744,8 @@ class Handler(BaseHTTPRequestHandler):
         self.send_json({"error":"not found"},404)
     def do_PATCH(self):
         path=urlparse(self.path).path
+        if not self._require_csrf():
+            return
         if path.startswith("/api/notifications/") and path.endswith("/read"):
             s=self.require("write")
             if not s: return
