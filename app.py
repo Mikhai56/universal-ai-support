@@ -428,11 +428,20 @@ def list_customers(search=None, limit=200):
     return out[:limit]
 
 def stats():
-    ts=list_tickets(limit=1000)
-    return {"total":len(ts),"answered":sum(x["status"]=="answered" for x in ts),
-            "escalated":sum(x["status"]=="escalated" for x in ts),
-            "open":sum(x["status"] in ("escalated","needs_clarification","open") for x in ts),
-            "resolved":sum(x["status"]=="resolved" for x in ts)}
+    conn=db(); pg=is_pg(conn); p="%s" if pg else "?"
+    def count(where="", params=()):
+        sql="SELECT COUNT(*) AS n FROM tickets"+((" WHERE "+where) if where else "")
+        return int(conn.execute(sql,tuple(params)).fetchone()["n"])
+    total=count()
+    answered=count("status="+p,("answered",))
+    escalated=count("status="+p,("escalated",))
+    open_count=count("status IN ('escalated','needs_clarification','open')")
+    resolved=count("status="+p,("resolved",))
+    conversations=int(conn.execute("SELECT COUNT(*) AS n FROM conversations").fetchone()["n"])
+    messages=int(conn.execute("SELECT COUNT(*) AS n FROM messages").fetchone()["n"])
+    conn.close()
+    return {"total":total,"answered":answered,"escalated":escalated,"open":open_count,
+            "resolved":resolved,"conversations":conversations,"messages":messages}
 
 def make_token(email,role):
     t=secrets.token_urlsafe(32); SESSIONS[t]={"expires":time.time()+TOKEN_TTL,"email":email,"role":role}; return t
