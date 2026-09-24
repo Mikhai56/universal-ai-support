@@ -19,6 +19,15 @@ OPERATORS_JSON = os.getenv("OPERATORS_JSON", "")
 MAX_MESSAGE_CHARS = min(max(int(os.getenv("MAX_MESSAGE_CHARS", "4096")), 128), 16384)
 TOKEN_TTL = 60 * 60 * 12
 SESSION_COOKIE_NAME = "sp_session"
+SECURE_COOKIES = os.getenv("SECURE_COOKIES", "0").strip().lower() in {"1", "true", "yes", "on"}
+
+def session_cookie(token, max_age=TOKEN_TTL):
+    secure = "; Secure" if SECURE_COOKIES else ""
+    return f"{SESSION_COOKIE_NAME}={token}; Path=/; HttpOnly; SameSite=Lax; Max-Age={int(max_age)}{secure}"
+
+def clear_session_cookie():
+    secure = "; Secure" if SECURE_COOKIES else ""
+    return f"{SESSION_COOKIE_NAME}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0{secure}"
 LEAD_RATE_WINDOW = 60
 LEAD_RATE_MAX = 10
 LEAD_RATE = {}
@@ -414,9 +423,9 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Referrer-Policy","no-referrer")
         self.send_header("Content-Security-Policy","default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'")
         if getattr(self,"_clear_session_cookie",False):
-            self.send_header("Set-Cookie",SESSION_COOKIE_NAME+"=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0")
+            self.send_header("Set-Cookie",clear_session_cookie())
         elif getattr(self,"_set_session_cookie",""):
-            self.send_header("Set-Cookie",SESSION_COOKIE_NAME+"="+self._set_session_cookie+"; Path=/; HttpOnly; SameSite=Lax; Max-Age="+str(TOKEN_TTL))
+            self.send_header("Set-Cookie",session_cookie(self._set_session_cookie))
         self.end_headers(); self.wfile.write(body)
     def body(self):
         n=int(self.headers.get("Content-Length","0"))
