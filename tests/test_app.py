@@ -179,6 +179,25 @@ class SupportPilotTests(unittest.TestCase):
         self.assertGreaterEqual(s["total"], 0)
         os.unlink(path)
 
+    def test_notifications_are_private_per_operator(self):
+        app, path = load_app()
+        app.create_operator("one@example.com", "onepass123", "operator")
+        app.create_operator("two@example.com", "twopass123", "operator")
+        tid = app.create_ticket("Нужна помощь", "Передано оператору", "escalated", "платёжный инцидент")
+        one = app.list_notifications("one@example.com")
+        two = app.list_notifications("two@example.com")
+        self.assertTrue(any(n["ticket_id"] == tid for n in one))
+        self.assertTrue(any(n["ticket_id"] == tid for n in two))
+        n1 = next(n for n in one if n["ticket_id"] == tid)
+        n2 = next(n for n in two if n["ticket_id"] == tid)
+        self.assertTrue(app.mark_notification_read(n1["id"], "one@example.com"))
+        one_after = next(n for n in app.list_notifications("one@example.com") if n["id"] == n1["id"])
+        two_after = next(n for n in app.list_notifications("two@example.com") if n["id"] == n2["id"])
+        self.assertIsNotNone(one_after["read_at"])
+        self.assertIsNone(two_after["read_at"])
+        self.assertFalse(app.mark_notification_read(n1["id"], "two@example.com"))
+        os.unlink(path)
+
     def test_operator_password_hash_and_roles(self):
         app, path = load_app()
         self.assertTrue(app.verify_password("secret", app.hash_password("secret")))
