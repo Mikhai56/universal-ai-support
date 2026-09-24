@@ -29,9 +29,16 @@ jobs:
           python-version: '3.13'
       - name: Compile application
         run: python -m py_compile app.py bot.py
-      - name: Verify repository contains no runtime database
+      - name: Verify tracked files contain no runtime database
+        shell: bash
         run: |
-          if find . -type f \\( -name '*.db' -o -name '*.sqlite' -o -name '*.sqlite3' \\) -print -quit | grep -q .; then
-            echo 'Runtime database must not be committed.' >&2
+          set -euo pipefail
+          bad_files="$(git ls-files -z | while IFS= read -r -d '' file; do
+            case "$file" in
+              *.db|*.sqlite|*.sqlite3) printf '%s\n' "$file" ;;
+            esac
+          done)"
+          if [ -n "$bad_files" ]; then
+            printf 'Runtime database must not be committed:\n%s\n' "$bad_files" >&2
             exit 1
           fi
