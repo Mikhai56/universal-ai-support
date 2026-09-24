@@ -602,8 +602,9 @@ class Handler(BaseHTTPRequestHandler):
             status=params.get("status",[None])[0]
             priority=params.get("priority",[None])[0]
             search=params.get("q",[""])[0]
+            assignee=params.get("assignee",[""])[0]
             try:
-                tickets=list_tickets(status=status,priority=priority,search=search)
+                tickets=list_tickets(status=status,priority=priority,search=search,assignee=assignee)
             except ValueError as e:
                 return self.send_json({"error":str(e)},400)
             return self.send_json({"tickets":tickets})
