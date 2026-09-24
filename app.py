@@ -337,6 +337,10 @@ def list_tickets(status=None, priority=None, search=None, assignee=None, unassig
         clauses.append("status="+("%s" if is_pg(conn) else "?")); vals.append(status)
     if priority:
         clauses.append("priority="+("%s" if is_pg(conn) else "?")); vals.append(priority)
+    if unassigned:
+        clauses.append("(assignee IS NULL OR assignee='')")
+    elif assignee:
+        clauses.append("assignee="+("%s" if is_pg(conn) else "?")); vals.append(str(assignee).strip().lower()[:254])
     if search:
         term="%"+search+"%"
         op="%s" if is_pg(conn) else "?"
@@ -803,8 +807,12 @@ class Handler(BaseHTTPRequestHandler):
             priority=params.get("priority",[None])[0]
             search=params.get("q",[""])[0]
             assignee=params.get("assignee",[""])[0]
+            unassigned=params.get("unassigned",["0"])[0] in ("1","true","yes")
+            if assignee=="__unassigned__":
+                assignee=""
+                unassigned=True
             try:
-                tickets=list_tickets(status=status,priority=priority,search=search,assignee=assignee)
+                tickets=list_tickets(status=status,priority=priority,search=search,assignee=assignee,unassigned=unassigned)
             except ValueError as e:
                 return self.send_json({"error":str(e)},400)
             return self.send_json({"tickets":tickets})
