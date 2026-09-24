@@ -409,6 +409,10 @@ class Handler(BaseHTTPRequestHandler):
         body=json.dumps(payload,ensure_ascii=False,default=str).encode()
         self.send_response(status); self.send_header("Content-Type","application/json; charset=utf-8")
         self.send_header("Content-Length",str(len(body))); self.send_header("Cache-Control","no-store")
+        self.send_header("X-Content-Type-Options","nosniff")
+        self.send_header("X-Frame-Options","DENY")
+        self.send_header("Referrer-Policy","no-referrer")
+        self.send_header("Content-Security-Policy","default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'")
         if getattr(self,"_clear_session_cookie",False):
             self.send_header("Set-Cookie",SESSION_COOKIE_NAME+"=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0")
         elif getattr(self,"_set_session_cookie",""):
@@ -490,7 +494,7 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_json(stats())
         if path in ("/","/index.html"):
             f=BASE/"web"/"index.html"; b=f.read_bytes()
-            self.send_response(200); self.send_header("Content-Type","text/html; charset=utf-8"); self.send_header("Content-Length",str(len(b))); self.end_headers(); self.wfile.write(b); return
+            self.send_response(200); self.send_header("Content-Type","text/html; charset=utf-8"); self.send_header("Content-Length",str(len(b))); self.send_header("Cache-Control","no-store"); self.send_header("X-Content-Type-Options","nosniff"); self.send_header("X-Frame-Options","DENY"); self.send_header("Referrer-Policy","no-referrer"); self.send_header("Content-Security-Policy","default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'") ; self.end_headers(); self.wfile.write(b); return
         self.send_json({"error":"not found"},404)
     def do_POST(self):
         self._set_session_cookie=""
