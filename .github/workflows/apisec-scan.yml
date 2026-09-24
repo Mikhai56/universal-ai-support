@@ -2,9 +2,9 @@ name: Python security checks
 
 on:
   push:
-    branches: [main]
+    branches: [main, integration/production-supportpilot]
   pull_request:
-    branches: [main]
+    branches: [main, integration/production-supportpilot]
   workflow_dispatch:
 
 permissions:
@@ -28,10 +28,10 @@ jobs:
         with:
           python-version: '3.13'
       - name: Compile application
-        run: python -m py_compile bot.py
+        run: python -m py_compile app.py bot.py
       - name: Verify repository contains no runtime database
         run: |
-          if find . -type f \( -name '*.db' -o -name '*.sqlite' -o -name '*.sqlite3' \) -print -quit | grep -q .; then
+          if find . -type f \\( -name '*.db' -o -name '*.sqlite' -o -name '*.sqlite3' \\) -print -quit | grep -q .; then
             echo 'Runtime database must not be committed.' >&2
             exit 1
           fi
