@@ -183,6 +183,14 @@ def init_db():
         conn.execute("""CREATE TABLE IF NOT EXISTS messages(
           id INTEGER PRIMARY KEY AUTOINCREMENT, conversation_id TEXT NOT NULL, role TEXT NOT NULL,
           content TEXT NOT NULL, status TEXT, ticket_id INTEGER, created_at TEXT NOT NULL)""")
+    if is_pg(conn):
+        conn.execute("""CREATE TABLE IF NOT EXISTS notifications(
+          id BIGSERIAL PRIMARY KEY, recipient TEXT, kind TEXT NOT NULL, title TEXT NOT NULL,
+          body TEXT, ticket_id BIGINT, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), read_at TIMESTAMPTZ)""")
+    else:
+        conn.execute("""CREATE TABLE IF NOT EXISTS notifications(
+          id INTEGER PRIMARY KEY AUTOINCREMENT, recipient TEXT, kind TEXT NOT NULL, title TEXT NOT NULL,
+          body TEXT, ticket_id INTEGER, created_at TEXT NOT NULL, read_at TEXT)""")
     seed_operators(conn)
     from lead_pipeline import init_leads
     init_leads(conn)
@@ -231,6 +239,8 @@ def create_ticket(question,answer,status,reason="",customer_name="",customer_ema
         cur=conn.execute("""INSERT INTO tickets(chat_id,username,question,answer,status,priority,reason,customer_name,customer_email,created_at,updated_at)
           VALUES(?,?,?,?,?,?,?,?,?,?,?)""",("web","web-user",q,a,status,"high" if status=="escalated" else "normal",reason,customer_name,customer_email,now,now))
         tid=cur.lastrowid
+    if status in ("escalated","needs_clarification"):
+        create_notification("ticket","Новое обращение требует внимания",f"Обращение #{tid}: {reason or status}",tid,conn=conn)
     conn.commit(); conn.close(); return tid
 
 def ai_answer(question):
@@ -373,6 +383,11 @@ def update_ticket(tid, fields, actor="system"):
             conn.execute("INSERT INTO ticket_events(ticket_id,actor,action,details) VALUES(%s,%s,%s,%s)",(tid,str(actor)[:160],"ticket.updated",details))
         else:
             conn.execute("INSERT INTO ticket_events(ticket_id,actor,action,details,created_at) VALUES(?,?,?,?,datetime('now'))",(tid,str(actor)[:160],"ticket.updated",details))
+    if changes:
+        if after.get("assignee"):
+            create_notification("assignment","Вам назначено обращение",f"Обращение #{tid}",tid,str(after["assignee"]).strip().lower(),conn=conn)
+        if after.get("status") in ("escalated","open"):
+            create_notification("ticket","Обновлено обращение",f"Обращение #{tid}: статус {after.get("status")}",tid,conn=conn)
     conn.commit(); conn.close()
     return True
 
@@ -442,6 +457,26 @@ def stats():
     conn.close()
     return {"total":total,"answered":answered,"escalated":escalated,"open":open_count,
             "resolved":resolved,"conversations":conversations,"messages":messages}
+
+def create_notification(kind,title,body="",ticket_id=None,recipient=None,conn=None):
+    own=conn is None
+    if own: conn=db()
+    pg=is_pg(conn)
+    if pg:
+        conn.execute("INSERT INTO notifications(recipient,kind,title,body,ticket_id) VALUES(%s,%s,%s,%s,%s)",(recipient,kind,str(title)[:200],str(body)[:2000],ticket_id))
+    else:
+        conn.execute("INSERT INTO notifications(recipient,kind,title,body,ticket_id,created_at) VALUES(?,?,?,?,?,datetime('now'))",(recipient,kind,str(title)[:200],str(body)[:2000],ticket_id))
+    if own: conn.commit(); conn.close()
+
+def list_notifications(recipient,limit=50):
+    limit=min(max(int(limit),1),100); conn=db(); pg=is_pg(conn); p="%s" if pg else "?"
+    rs=conn.execute(f"SELECT * FROM notifications WHERE recipient IS NULL OR recipient={p} ORDER BY id DESC LIMIT {limit}",(recipient,)).fetchall()
+    conn.close(); return [row(x) for x in rs]
+
+def mark_notification_read(notification_id,recipient):
+    conn=db(); pg=is_pg(conn); p="%s" if pg else "?"
+    rs=conn.execute("UPDATE notifications SET read_at="+("NOW()" if pg else "datetime('now')")+" WHERE id="+p+" AND (recipient IS NULL OR recipient="+p+")",(notification_id,recipient))
+    conn.commit(); changed=rs.rowcount; conn.close(); return bool(changed)
 
 def make_token(email,role):
     t=secrets.token_urlsafe(32); SESSIONS[t]={"expires":time.time()+TOKEN_TTL,"email":email,"role":role}; return t
@@ -563,6 +598,11 @@ class Handler(BaseHTTPRequestHandler):
         if path=="/api/stats":
             if not self.require(): return
             return self.send_json(stats())
+        if path=="/api/notifications":
+            s=self.require()
+            if not s: return
+            items=list_notifications(s["email"])
+            return self.send_json({"notifications":items,"unread":sum(1 for x in items if not x.get("read_at"))})
         if path in ("/","/index.html"):
             f=BASE/"web"/"index.html"; b=f.read_bytes()
             self.send_response(200); self.send_header("Content-Type","text/html; charset=utf-8"); self.send_header("Content-Length",str(len(b))); self.send_header("Cache-Control","no-store"); self.send_header("X-Content-Type-Options","nosniff"); self.send_header("X-Frame-Options","DENY"); self.send_header("Referrer-Policy","no-referrer"); self.send_header("Content-Security-Policy","default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'") ; self.end_headers(); self.wfile.write(b); return
@@ -630,6 +670,13 @@ class Handler(BaseHTTPRequestHandler):
         self.send_json({"error":"not found"},404)
     def do_PATCH(self):
         path=urlparse(self.path).path
+        if path.startswith("/api/notifications/") and path.endswith("/read"):
+            s=self.require("write")
+            if not s: return
+            try: nid=int(path.split("/")[3])
+            except ValueError: return self.send_json({"error":"invalid notification id"},400)
+            return self.send_json({"ok":mark_notification_read(nid,s["email"])})
+
         if path.startswith("/api/leads/"):
             s=self.require("write")
             if not s: return
