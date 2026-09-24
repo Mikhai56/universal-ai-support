@@ -586,7 +586,7 @@ class Handler(BaseHTTPRequestHandler):
             if op and verify_password(password,op["password_hash"]):
                 LOGIN_RATE.pop(client,None)
                 self._set_session_cookie=make_token(op["email"],op["role"])
-                return self.send_json({"ok":True,"token":self._set_session_cookie,"user":{"email":op["email"],"role":op["role"]}})
+                return self.send_json({"ok":True,"user":{"email":op["email"],"role":op["role"]}})
             if not ADMIN_PASSWORD and not OPERATORS_JSON:
                 return self.send_json({"ok":False,"error":"No operator credentials are configured on the server"},503)
             return self.send_json({"ok":False,"error":"Неверный email или пароль"},401)
