@@ -1,58 +1,63 @@
-# SupportPilot — Telegram + Web
+# SupportPilot — AI Customer Support
 
-AI-поддержка с базой знаний, историей обращений, безопасной эскалацией и очередью оператора.
+Полноценная web-панель поддержки: AI-чат, обращения, клиенты, лиды, база знаний, роли операторов и аудит изменений.
 
-## Возможности
+## Что уже есть
 
-- `/start` — начало диалога в Telegram;
-- ответы из `knowledge_base.json`;
-- автоматическая эскалация платежей, возвратов, privacy, security и юридических вопросов;
-- SQLite-история тикетов и сообщений;
-- `/operator` — запросить человека;
-- `/queue` — очередь эскалаций для администратора;
-- `/resolve_ID` — закрыть тикет и уведомить клиента;
-- web-интерфейс чата через `/`;
-- HTTP API: `/api/chat` и `/api/health`;
-- Docker-образ для публичного развёртывания.
+- AI-чат с базой знаний и OpenAI-compatible API;
+- безопасная эскалация чувствительных обращений;
+- тикеты с приоритетами, статусами, исполнителями и историей изменений;
+- CRM клиентов и связь клиентов с лидами;
+- lead pipeline с аудитом действий операторов;
+- роли admin, operator и viewer;
+- HttpOnly-сессии, rate limiting и security headers;
+- PostgreSQL через DATABASE_URL с SQLite fallback для локального запуска;
+- Docker-образ и health endpoint /api/health.
 
-## Быстрый публичный запуск
+## Production
 
-Проект подготовлен для Render через `render.yaml`. В Blueprint уже описаны web-сервис и Telegram worker. Render поддерживает Docker-деплой и HTTP health check для `/api/health`. Для web-сервиса сейчас используется бесплатный compute plan; его файловая система временная, поэтому история web-тестов не рассчитана на долговременное хранение без отдельного persistent storage.
+Один web-процесс запускается так:
 
-**Deploy to Render:**
+    python3 app.py
 
-https://render.com/deploy?repo=https://github.com/Mikhai56/universal-ai-support
+или через Docker:
 
-После создания web-сервиса Render выдаст публичный адрес вида `https://supportpilot-web.onrender.com`.
+    docker build -t supportpilot .
+    docker run --rm -p 8080:8080 \
+      -e ADMIN_EMAIL=admin@example.com \
+      -e ADMIN_PASSWORD='CHANGE_ME' \
+      -e AI_API_KEY='YOUR_AI_KEY' \
+      -e SECURE_COOKIES=1 \
+      supportpilot
 
-## Telegram
+Для production рекомендуется HTTPS, SECURE_COOKIES=1 и PostgreSQL через DATABASE_URL. Секреты должны храниться только в настройках хостинга, а не в GitHub.
 
-Для Telegram worker задайте секреты в Render:
+## Health check
 
-```text
-TELEGRAM_BOT_TOKEN=токен_от_BotFather
-ADMIN_CHAT_ID=ваш_chat_id
-```
+    GET /api/health
 
-Не добавляйте эти значения в GitHub.
+Ожидаемый ответ содержит "ok": true.
+
+## Vercel / хостинг
+
+Текущая серверная часть — Python HTTP-сервис, а не стандартная Next.js/Vercel Function. Поэтому не добавляем формальный vercel.json, который создаст deployment, но не обеспечит рабочий runtime.
+
+Docker-конфигурация переносима между Docker-хостингами. Старый render.yaml сохранён только для совместимости с прежним deployment-сценарием и больше не является архитектурной частью приложения.
 
 ## Локальный запуск
 
-```bash
-python3 app.py
-```
+    python3 app.py
 
-После запуска откройте `http://localhost:8080`.
+Откройте http://localhost:8080.
 
-Для Telegram:
+Для Telegram worker:
 
-```bash
-python3 bot.py
-```
+    python3 bot.py
 
 ## Безопасность
 
-- Не вставляйте токены и API-ключи в исходный код или переписку.
-- Не публикуйте `supportpilot.db`.
-- Перед реальным использованием добавьте политику конфиденциальности и срок хранения истории.
-- Для production рекомендуется постоянное хранилище и мониторинг.
+- API-ключи и токены не должны попадать в исходный код.
+- Пароли операторов хранятся как PBKDF2-HMAC-SHA256 hashes.
+- Браузерная сессия использует HttpOnly cookie.
+- Для production включайте SECURE_COOKIES=1.
+- Данные карт и CVV маскируются до сохранения в тикет.

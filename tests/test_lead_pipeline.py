@@ -1,0 +1,91 @@
+import os
+import tempfile
+import unittest
+
+import app
+from lead_pipeline import create_lead, init_leads, list_leads, list_lead_events, update_lead
+
+class LeadPipelineTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp=tempfile.NamedTemporaryFile(delete=False)
+        self.tmp.close()
+        os.environ["DB_PATH"]=self.tmp.name
+        app.DB_PATH=self.tmp.name
+        app.init_db()
+        conn=app.db()
+        init_leads(conn)
+        conn.commit()
+        conn.close()
+
+    def tearDown(self):
+        try: os.unlink(self.tmp.name)
+        except FileNotFoundError: pass
+
+    def test_create_and_update_lead(self):
+        lead_id=create_lead({"name":"Test","email":"test@example.com","company":"Example","message":"Need a quote"})
+        rows=list_leads()
+        self.assertEqual(rows[0]["id"],lead_id)
+        self.assertEqual(rows[0]["status"],"NEW")
+        self.assertTrue(update_lead(lead_id,{"status":"RESEARCHING"}))
+        self.assertTrue(update_lead(lead_id,{"status":"QUALIFIED","qualification_reason":"Relevant request"}))
+        self.assertEqual(list_leads()[0]["status"],"QUALIFIED")
+        events=list_lead_events(lead_id)
+        self.assertEqual(len(events),2)
+        self.assertTrue(all(e["action"]=="lead.updated" for e in events))
+        self.assertIn("QUALIFIED", events[0]["details"])
+
+    def test_redacts_card_data_in_phone_and_generated_fields(self):
+        lead_id = create_lead({
+            "name":"Test","email":"test@example.com",
+            "phone":"4111 1111 1111 1111",
+            "message":"Hello",
+            "generated_email":"Card 4111 1111 1111 1111"
+        })
+        row = list_leads()[0]
+        self.assertEqual(row["id"], lead_id)
+        self.assertNotIn("4111 1111 1111 1111", row["phone"])
+        self.assertNotIn("4111 1111 1111 1111", row["generated_email"])
+
+    def test_detail_and_qualification_limits(self):
+        lead_id=create_lead({"name":"Test","email":"test@example.com","message":"Hello"})
+        from lead_pipeline import get_lead
+        row=get_lead(lead_id)
+        self.assertEqual(row["id"],lead_id)
+        self.assertTrue(update_lead(lead_id,{"status":"RESEARCHING"}))
+        self.assertTrue(update_lead(lead_id,{"status":"QUALIFIED","qualification_category":"x"*500,"qualification_reason":"y"*5000}))
+        row=get_lead(lead_id)
+        self.assertEqual(row["status"],"QUALIFIED")
+        self.assertEqual(len(row["qualification_category"]),200)
+        self.assertEqual(len(row["qualification_reason"]),2000)
+        with self.assertRaises(ValueError):
+            update_lead(lead_id,{"status":"INVALID"})
+        with self.assertRaises(ValueError):
+            update_lead(lead_id,{"status":"SENT"})
+
+    def test_reject_invalid_email(self):
+        with self.assertRaises(ValueError):
+            create_lead({"name":"Test","email":"not-an-email","message":"Hello"})
+
+    def test_redacts_card_data(self):
+        lead_id = create_lead({"name":"Test","email":"test@example.com","message":"Card 4111 1111 1111 1111"})
+        row = list_leads()[0]
+        self.assertEqual(row["id"], lead_id)
+        self.assertNotIn("4111 1111 1111 1111", row["message"])
+
+    def test_status_transitions(self):
+        lead_id=create_lead({"name":"Flow","email":"flow@example.com","message":"Hello"})
+        self.assertTrue(update_lead(lead_id,{"status":"RESEARCHING"}))
+        self.assertTrue(update_lead(lead_id,{"status":"QUALIFIED"}))
+        self.assertTrue(update_lead(lead_id,{"status":"PENDING_APPROVAL"}))
+        self.assertTrue(update_lead(lead_id,{"status":"SENT"}))
+        with self.assertRaises(ValueError):
+            update_lead(lead_id,{"status":"RESEARCHING"})
+
+    def test_failed_can_restart_research(self):
+        lead_id=create_lead({"name":"Retry","email":"retry@example.com","message":"Hello"})
+        update_lead(lead_id,{"status":"RESEARCHING"})
+        update_lead(lead_id,{"status":"FAILED"})
+        self.assertTrue(update_lead(lead_id,{"status":"RESEARCHING"}))
+
+if __name__=="__main__":
+    unittest.main()
