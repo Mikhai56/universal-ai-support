@@ -764,7 +764,17 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         path=urlparse(self.path).path
         if path=="/api/health":
-            return self.send_json({"ok":True,"service":"SupportPilot","version":"2.0","database":"postgres" if DATABASE_URL else "sqlite-fallback","ai":bool(AI_API_KEY),"auth":bool(ADMIN_PASSWORD or OPERATORS_JSON)})
+            conn=None
+            try:
+                conn=db()
+                operator_count=int(conn.execute("SELECT COUNT(*) AS n FROM operators").fetchone()["n"])
+            except Exception:
+                operator_count=0
+            finally:
+                if conn is not None:
+                    conn.close()
+            configured=bool(ADMIN_PASSWORD or OPERATORS_JSON)
+            return self.send_json({"ok":True,"service":"SupportPilot","version":"2.0","database":"postgres" if DATABASE_URL else "sqlite-fallback","ai":bool(AI_API_KEY),"auth":configured or operator_count>0,"setup_required":not configured and operator_count==0})
         if path=="/api/me":
             s=self.require()
             if not s: return
@@ -858,10 +868,35 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         self._set_session_cookie=""
         path=urlparse(self.path).path
-        if path not in ("/api/login","/api/chat","/api/leads") and not self._require_csrf():
+        if path not in ("/api/login","/api/setup-admin","/api/chat","/api/leads") and not self._require_csrf():
             return
         try: p=self.body()
         except ValueError as e: return self.send_json({"error":str(e)},413 if "large" in str(e) else 400)
+        if path=="/api/setup-admin":
+            email=str(p.get("email","")).strip().lower()
+            password=str(p.get("password",""))
+            if ADMIN_PASSWORD or OPERATORS_JSON:
+                return self.send_json({"error":"Admin setup is already configured"},409)
+            conn=db()
+            try:
+                count=int(conn.execute("SELECT COUNT(*) AS n FROM operators").fetchone()["n"])
+                if count:
+                    return self.send_json({"error":"Admin setup has already been completed"},409)
+                if not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+",email):
+                    return self.send_json({"error":"invalid operator email"},400)
+                validate_password(password)
+                encoded=hash_password(password)
+                if is_pg(conn):
+                    conn.execute("INSERT INTO operators(email,password_hash,role) VALUES(%s,%s,%s)",(email,encoded,"admin"))
+                else:
+                    conn.execute("INSERT INTO operators(email,password_hash,role,created_at) VALUES(?,?,?,datetime('now'))",(email,encoded,"admin"))
+                conn.commit()
+            except ValueError as e:
+                return self.send_json({"error":str(e)},400)
+            finally:
+                conn.close()
+            self._set_session_cookie=make_token(email,"admin")
+            return self.send_json({"ok":True,"user":{"email":email,"role":"admin"}})
         if path=="/api/login":
             email=str(p.get("email","")).strip(); password=str(p.get("password",""))
             now=time.time(); client=self.client_address[0]
