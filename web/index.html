@@ -62,12 +62,17 @@ async function saveTicket(id){await api('/api/tickets/'+id,{method:'PATCH',body:
 async function resolveTicket(id){await api('/api/tickets/'+id,{method:'PATCH',body:JSON.stringify({status:'resolved'})});closeTicket();loadTickets();loadStats()}
 function closeTicket(){$('ticketModal').classList.add('hidden')}
 async function loadCustomers(){
-let q=$('customerSearch')?.value.trim()||'';
-let d=await api('/api/customers'+(q?'?q='+encodeURIComponent(q):''));
-let a=d.customers||[];
-window.customersByKey={};
-a.forEach(x=>window.customersByKey[x.key]=x);
-$('customersList').innerHTML=a.length?a.map(x=>'<div class="item" style="display:flex;justify-content:space-between;gap:12px;align-items:center"><div><b>'+esc(x.name)+'</b><br><span class="small">'+esc(x.email||'Email не указан')+' · обращений: '+x.total_tickets+' · открытых: '+x.open_tickets+' · эскалаций: '+x.escalated_tickets+'</span><br><span class="small">Последняя активность: '+new Date(x.last_interaction).toLocaleString(\'ru-RU\')+'</span></div><button class="btn secondary" onclick="openCustomerByEncoded(this.dataset.key)" data-key="'+encodeURIComponent(x.key)+'">Карточка</button></div>').join(''):'<div class="empty">Клиентов по заданным условиям не найдено.</div>';
+  const q=$('customerSearch')?.value.trim()||'';
+  try{
+    const d=await api('/api/customers'+(q?'?q='+encodeURIComponent(q):''));
+    const a=d.customers||[];
+    window.customersByKey={};
+    a.forEach(x=>window.customersByKey[x.key]=x);
+    $('customersList').innerHTML=a.length?a.map(x=>{
+      const last=x.last_interaction?new Date(x.last_interaction).toLocaleString('ru-RU'):'—';
+      return '<div class="item" style="display:flex;justify-content:space-between;gap:12px;align-items:center"><div><b>'+esc(x.name)+'</b><br><span class="small">'+esc(x.email||'Email не указан')+' · обращений: '+x.total_tickets+' · открытых: '+x.open_tickets+' · эскалаций: '+x.escalated_tickets+'</span><br><span class="small">Последняя активность: '+esc(last)+'</span></div><button class="btn secondary" onclick="openCustomerByEncoded(this.dataset.key)" data-key="'+encodeURIComponent(x.key)+'">Карточка</button></div>';
+    }).join(''):'<div class="empty">Клиентов по заданным условиям не найдено.</div>';
+  }catch(e){ $('customersList').innerHTML='<div class="empty">'+esc(e.message)+'</div>'; }
 }
 function openCustomerByEncoded(value){openCustomer(decodeURIComponent(value))}
 async function openCustomer(key){
