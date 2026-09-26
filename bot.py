@@ -28,11 +28,19 @@ LAST_MESSAGE_AT = {}
 with open(KB_PATH, encoding="utf-8") as file: KB = json.load(file)
 
 def now(): return datetime.now(timezone.utc).isoformat()
-def db():
-    conn=sqlite3.connect(DB_PATH,timeout=10); conn.row_factory=sqlite3.Row
+def _open_db(path):
+    conn=sqlite3.connect(path,timeout=10); conn.row_factory=sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("""CREATE TABLE IF NOT EXISTS tickets(id INTEGER PRIMARY KEY AUTOINCREMENT,chat_id TEXT NOT NULL,username TEXT,question TEXT NOT NULL,answer TEXT,status TEXT NOT NULL,reason TEXT,created_at TEXT NOT NULL,resolved_at TEXT)""")
     conn.commit(); return conn
+def db():
+    try:
+        return _open_db(DB_PATH)
+    except sqlite3.OperationalError as error:
+        if "readonly" not in str(error).lower() and "read-only" not in str(error).lower(): raise
+        fallback="/tmp/supportpilot.db"
+        print(f"SQLite path {DB_PATH!r} is not writable; using {fallback!r}: {error}",flush=True)
+        return _open_db(fallback)
 
 def cleanup_old_tickets():
     cutoff=(datetime.now(timezone.utc)-timedelta(days=RETENTION_DAYS)).isoformat()
