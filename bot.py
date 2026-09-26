@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """SupportPilot Telegram bot: sourced KB, SQLite, human escalation."""
-import html, json, os, re, sqlite3, time, urllib.error, urllib.request
+import html, json, os, random, re, sqlite3, time, urllib.error, urllib.request
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -133,13 +133,20 @@ def handle(message):
 def run():
     if not TOKEN: raise SystemExit("Set TELEGRAM_BOT_TOKEN")
     db().close(); cleanup_old_tickets(); offset=0; print("SupportPilot started",flush=True)
+    retry_delay = 1.0
+    max_retry_delay = 60.0
     while True:
         try:
             updates=api("getUpdates",{"offset":offset,"timeout":50,"allowed_updates":["message"]})
+            retry_delay = 1.0
             for update in updates:
                 offset=update["update_id"]+1
                 if "message" in update: handle(update["message"])
         except (urllib.error.URLError,TimeoutError,RuntimeError,ValueError,sqlite3.Error) as error:
-            print("Polling error:",error,flush=True); time.sleep(3)
+            jitter=random.uniform(0, min(1.0, retry_delay * 0.25))
+            delay=retry_delay + jitter
+            print(f"Polling error: {error}; retrying in {delay:.1f}s",flush=True)
+            time.sleep(delay)
+            retry_delay=min(max_retry_delay, retry_delay * 2)
         except KeyboardInterrupt: break
 if __name__=="__main__": run()
