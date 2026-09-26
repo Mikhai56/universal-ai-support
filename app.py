@@ -907,6 +907,33 @@ class Handler(BaseHTTPRequestHandler):
             LOGIN_RATE[client]=recent+[now]
             conn=db()
             op=conn.execute("SELECT email,password_hash,role FROM operators WHERE email="+("%s" if is_pg(conn) else "?"),(email.lower(),)).fetchone()
+            # First-run bootstrap also works through the normal login endpoint.
+            # This keeps older cached frontends usable while the setup screen rolls out.
+            if not op and not ADMIN_PASSWORD and not OPERATORS_JSON:
+                try:
+                    count=int(conn.execute("SELECT COUNT(*) AS n FROM operators").fetchone()["n"])
+                    if count==0:
+                        if not re.fullmatch(r"[^@\\s]+@[^@\\s]+\\.[^@\\s]+",email):
+                            conn.close()
+                            return self.send_json({"ok":False,"error":"invalid operator email"},400)
+                        validate_password(password)
+                        encoded=hash_password(password)
+                        if is_pg(conn):
+                            conn.execute("INSERT INTO operators(email,password_hash,role) VALUES(%s,%s,%s)",(email.lower(),encoded,"admin"))
+                        else:
+                            conn.execute("INSERT INTO operators(email,password_hash,role,created_at) VALUES(?,?,?,datetime('now'))",(email.lower(),encoded,"admin"))
+                        conn.commit()
+                        conn.close()
+                        LOGIN_RATE.pop(client,None)
+                        self._set_session_cookie=make_token(email.lower(),"admin")
+                        return self.send_json({"ok":True,"user":{"email":email.lower(),"role":"admin"},"setup":True})
+                except ValueError as e:
+                    conn.close()
+                    return self.send_json({"ok":False,"error":str(e)},400)
+                except Exception:
+                    conn.rollback()
+                    conn.close()
+                    return self.send_json({"ok":False,"error":"first-run setup failed"},500)
             conn.close()
             if op and verify_password(password,op["password_hash"]):
                 LOGIN_RATE.pop(client,None)
