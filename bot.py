@@ -7,7 +7,7 @@ from pathlib import Path
 BASE = Path(__file__).resolve().parent
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 ADMIN_CHAT_ID = os.getenv("ADMIN_CHAT_ID", "").strip()
-DB_PATH = os.getenv("DB_PATH", str(BASE / "supportpilot.db"))
+DB_PATH = os.getenv("DB_PATH", "/var/data/supportpilot.db")
 KB_PATH = os.getenv("KB_PATH", str(BASE / "knowledge_base.json"))
 TG_API = "https://api.telegram.org/bot" + TOKEN
 
