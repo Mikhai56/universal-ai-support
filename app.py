@@ -170,6 +170,8 @@ def init_db():
           actor TEXT NOT NULL, action TEXT NOT NULL, details TEXT, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())""")
         conn.execute("ALTER TABLE tickets ADD COLUMN IF NOT EXISTS company_id TEXT")
         conn.execute("ALTER TABLE ticket_events ADD COLUMN IF NOT EXISTS company_id TEXT")
+        conn.execute("ALTER TABLE conversations ADD COLUMN IF NOT EXISTS company_id TEXT")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_conversations_company_id ON conversations(company_id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_tickets_company_id ON tickets(company_id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_ticket_events_company_id ON ticket_events(company_id)")
     else:
@@ -180,6 +182,9 @@ def init_db():
         if "company_id" not in tc: conn.execute("ALTER TABLE tickets ADD COLUMN company_id TEXT")
         ec={r["name"] for r in conn.execute("PRAGMA table_info(ticket_events)").fetchall()}
         if "company_id" not in ec: conn.execute("ALTER TABLE ticket_events ADD COLUMN company_id TEXT")
+        cc={r["name"] for r in conn.execute("PRAGMA table_info(conversations)").fetchall()}
+        if "company_id" not in cc: conn.execute("ALTER TABLE conversations ADD COLUMN company_id TEXT")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_conversations_company_id ON conversations(company_id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_tickets_company_id ON tickets(company_id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_ticket_events_company_id ON ticket_events(company_id)")
     if is_pg(conn):
@@ -194,14 +199,14 @@ def init_db():
         """)
     if is_pg(conn):
         conn.execute("""CREATE TABLE IF NOT EXISTS conversations(
-          id TEXT PRIMARY KEY, customer_name TEXT, customer_email TEXT,
+          id TEXT PRIMARY KEY, company_id TEXT, customer_name TEXT, customer_email TEXT,
           created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())""")
         conn.execute("""CREATE TABLE IF NOT EXISTS messages(
           id BIGSERIAL PRIMARY KEY, conversation_id TEXT NOT NULL, role TEXT NOT NULL,
           content TEXT NOT NULL, status TEXT, ticket_id BIGINT, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())""")
     else:
         conn.execute("""CREATE TABLE IF NOT EXISTS conversations(
-          id TEXT PRIMARY KEY, customer_name TEXT, customer_email TEXT,
+          id TEXT PRIMARY KEY, company_id TEXT, customer_name TEXT, customer_email TEXT,
           created_at TEXT NOT NULL, updated_at TEXT NOT NULL)""")
         conn.execute("""CREATE TABLE IF NOT EXISTS messages(
           id INTEGER PRIMARY KEY AUTOINCREMENT, conversation_id TEXT NOT NULL, role TEXT NOT NULL,
@@ -255,14 +260,14 @@ def redact_sensitive(text):
 def create_ticket(question,answer,status,reason="",customer_name="",customer_email="",company_id=None):
     conn=db(); q=redact_sensitive(question); a=redact_sensitive(answer)
     if is_pg(conn):
-        cur=conn.execute("""INSERT INTO tickets(chat_id,username,question,answer,status,priority,reason,customer_name,customer_email)
-          VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id""",
+        cur=conn.execute("""INSERT INTO tickets(chat_id,username,question,answer,status,priority,reason,customer_name,customer_email,company_id)
+          VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id""",
           ("web","web-user",q,a,status,"high" if status=="escalated" else "normal",reason,customer_name,customer_email,company_id))
         tid=cur.fetchone()["id"]
     else:
         now=time.strftime("%Y-%m-%d %H:%M:%S")
-        cur=conn.execute("""INSERT INTO tickets(chat_id,username,question,answer,status,priority,reason,customer_name,customer_email,created_at,updated_at)
-          VALUES(?,?,?,?,?,?,?,?,?,?,?)""",("web","web-user",q,a,status,"high" if status=="escalated" else "normal",reason,customer_name,customer_email,now,now,company_id))
+        cur=conn.execute("""INSERT INTO tickets(chat_id,username,question,answer,status,priority,reason,customer_name,customer_email,company_id,created_at,updated_at)
+          VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",("web","web-user",q,a,status,"high" if status=="escalated" else "normal",reason,customer_name,customer_email,company_id,now,now))
         tid=cur.lastrowid
     # Record the creation event so every ticket has a complete audit trail from the first moment.
     if is_pg(conn):
@@ -293,37 +298,42 @@ def save_message(conversation_id, role, content, status="", ticket_id=None):
     else: conn.execute("INSERT INTO messages(conversation_id,role,content,status,ticket_id,created_at) VALUES(?,?,?,?,?,datetime('now'))",(conversation_id,role,content,status,ticket_id))
     conn.commit(); conn.close()
 
-def ensure_conversation(name="", email="", conversation_id=""):
+def ensure_conversation(name="", email="", conversation_id="", company_id=None):
     cid=str(conversation_id or "").strip()
     if not re.fullmatch(r"[a-f0-9]{32}",cid): cid=secrets.token_hex(16)
     name=str(name or "").strip()[:120]; email=str(email or "").strip().lower()[:254]
     conn=db(); pg=is_pg(conn); p="%s" if pg else "?"
-    found=conn.execute("SELECT id FROM conversations WHERE id="+p,(cid,)).fetchone()
+    scope=(" AND company_id="+p) if company_id is not None else ""
+    scope_vals=[str(company_id)] if company_id is not None else []
+    found=conn.execute("SELECT id FROM conversations WHERE id="+p+scope,(cid,*scope_vals)).fetchone()
     if found:
-        conn.execute("UPDATE conversations SET customer_name="+p+", customer_email="+p+", updated_at="+("NOW()" if pg else "datetime('now')")+" WHERE id="+p,(name or None,email or None,cid))
-    elif pg: conn.execute("INSERT INTO conversations(id,customer_name,customer_email) VALUES(%s,%s,%s)",(cid,name or None,email or None))
-    else: conn.execute("INSERT INTO conversations(id,customer_name,customer_email,created_at,updated_at) VALUES(?,?,?,?,?)",(cid,name or None,email or None,time.strftime("%Y-%m-%d %H:%M:%S"),time.strftime("%Y-%m-%d %H:%M:%S")))
+        conn.execute("UPDATE conversations SET customer_name="+p+", customer_email="+p+", updated_at="+("NOW()" if pg else "datetime('now')")+" WHERE id="+p+scope,(name or None,email or None,cid,*scope_vals))
+    elif pg: conn.execute("INSERT INTO conversations(id,company_id,customer_name,customer_email) VALUES(%s,%s,%s,%s)",(cid,company_id,name or None,email or None))
+    else: conn.execute("INSERT INTO conversations(id,company_id,customer_name,customer_email,created_at,updated_at) VALUES(?,?,?,?,?,?)",(cid,company_id,name or None,email or None,time.strftime("%Y-%m-%d %H:%M:%S"),time.strftime("%Y-%m-%d %H:%M:%S")))
     conn.commit(); conn.close(); return cid
 
-def list_messages(conversation_id, limit=100):
+def list_messages(conversation_id, limit=100, company_id=None):
     limit=min(max(int(limit),1),100); conn=db(); pg=is_pg(conn); p="%s" if pg else "?"
-    rs=conn.execute(f"SELECT * FROM messages WHERE conversation_id={p} ORDER BY id ASC LIMIT {p}",(conversation_id,limit)).fetchall()
+    if company_id is None:
+        rs=conn.execute(f"SELECT m.* FROM messages m WHERE m.conversation_id={p} ORDER BY m.id ASC LIMIT {p}",(conversation_id,limit)).fetchall()
+    else:
+        rs=conn.execute(f"SELECT m.* FROM messages m JOIN conversations c ON c.id=m.conversation_id WHERE m.conversation_id={p} AND c.company_id={p} ORDER BY m.id ASC LIMIT {p}",(conversation_id,str(company_id),limit)).fetchall()
     conn.close(); return [row(x) for x in rs]
 
-def answer_question(question, name="", email="", conversation_id=""):
+def answer_question(question, name="", email="", conversation_id="", company_id=None):
     question=redact_sensitive((question or "").strip())[:MAX_MESSAGE_CHARS]
     if not question: return {"answer":"Напишите вопрос одним сообщением.","status":"needs_clarification"}
-    conversation_id=ensure_conversation(name,email,conversation_id)
+    conversation_id=ensure_conversation(name,email,conversation_id,company_id)
     save_message(conversation_id,"user",question,"received")
     reason=risky(question)
     if reason:
         answer="Я передал обращение специалисту, чтобы не дать неточный или небезопасный ответ. Не отправляйте пароли и полные реквизиты карты."
-        ticket_id=create_ticket(question,answer,"escalated",reason,name,email)
+        ticket_id=create_ticket(question,answer,"escalated",reason,name,email,company_id=company_id)
         save_message(conversation_id,"assistant",answer,"escalated",ticket_id)
         return {"answer":answer,"status":"escalated","ticket_id":ticket_id,"conversation_id":conversation_id}
     answer,topic,must_escalate,source=local_answer(question)
     if answer and must_escalate:
-        ticket_id=create_ticket(question,answer,"escalated",topic,name,email)
+        ticket_id=create_ticket(question,answer,"escalated",topic,name,email,company_id=company_id)
         save_message(conversation_id,"assistant",answer,"escalated",ticket_id)
         return {"answer":answer,"status":"escalated","ticket_id":ticket_id,"conversation_id":conversation_id,"source":source}
     ai=ai_answer(question)
@@ -408,21 +418,30 @@ def list_ticket_events(tid, limit=100, company_id=None):
         rs=conn.execute(f"SELECT * FROM ticket_events WHERE ticket_id={p} AND company_id={p} ORDER BY id DESC LIMIT {p}",(tid,str(company_id),limit)).fetchall()
     conn.close(); return [row(x) for x in rs]
 
-def list_customers(search=None, limit=200):
+def list_customers(search=None, limit=200, company_id=None):
     search=str(search or "").strip()[:120]
     limit=min(max(int(limit),1),200)
     conn=db(); pg=is_pg(conn); p="%s" if pg else "?"
     where=""
     vals=[]
+    if company_id is not None:
+        where=" WHERE company_id="+p
+        vals.append(str(company_id))
     if search:
         term="%"+search+"%"
-        where=" WHERE customer_email LIKE "+p+" OR customer_name LIKE "+p
+        prefix=" AND " if where else " WHERE "
+        where=where+prefix+"(customer_email LIKE "+p+" OR customer_name LIKE "+p+")"
         vals.extend([term,term])
     rs=conn.execute(f"SELECT * FROM tickets{where} ORDER BY created_at DESC LIMIT {p}",tuple(vals+[5000])).fetchall()
     tickets=[row(x) for x in rs]
     leads=[]
     try:
-        lrs=conn.execute("SELECT id,email,name,company,status,created_at FROM leads ORDER BY created_at DESC LIMIT 5000").fetchall()
+        lead_sql="SELECT id,email,name,company,status,created_at FROM leads"
+        lead_vals=[]
+        if company_id is not None:
+            lead_sql+=" WHERE company_id="+p; lead_vals.append(str(company_id))
+        lead_sql+=" ORDER BY created_at DESC LIMIT 5000"
+        lrs=conn.execute(lead_sql,tuple(lead_vals)).fetchall()
         leads=[row(x) for x in lrs]
     except Exception:
         leads=[]
@@ -976,9 +995,16 @@ class Handler(BaseHTTPRequestHandler):
         if path=="/api/kb":
             return self.send_json({"items":KB,"count":len(KB)})
         if path.startswith("/api/conversations/") and path.endswith("/messages"):
-            if not self.require(): return
+            company=company_from_request(self)
+            if not company and not self.require(): return
             conversation_id=path.split("/")[3]
-            return self.send_json({"conversation_id":conversation_id,"messages":list_messages(conversation_id)})
+            messages=list_messages(conversation_id,company_id=company["id"] if company else None)
+            if company and not messages:
+                conn=db(); p="%s" if is_pg(conn) else "?"
+                exists=conn.execute("SELECT id FROM conversations WHERE id="+p+" AND company_id="+p,(conversation_id,company["id"])).fetchone()
+                conn.close()
+                if not exists: return self.send_json({"error":"conversation not found"},404)
+            return self.send_json({"conversation_id":conversation_id,"messages":messages})
         if path=="/api/leads":
             if not self.require(): return
             from lead_pipeline import list_leads
@@ -989,13 +1015,15 @@ class Handler(BaseHTTPRequestHandler):
                 from lead_pipeline import LEAD_STATUSES
                 if status not in LEAD_STATUSES:
                     return self.send_json({"error":"invalid lead status"},400)
-            return self.send_json({"leads":list_leads(status=status,search=search)})
+            company=company_from_request(self)
+            return self.send_json({"leads":list_leads(status=status,search=search,company_id=company["id"] if company else None)})
         if path.startswith("/api/leads/"):
             if not self.require(): return
             from lead_pipeline import get_lead, list_lead_events
             lead_id=path.rsplit("/",1)[1]
-            lead=get_lead(lead_id)
-            return self.send_json({"lead":lead,"events":list_lead_events(lead_id)} if lead else {"error":"lead not found"},200 if lead else 404)
+            company=company_from_request(self)
+            lead=get_lead(lead_id,company_id=company["id"] if company else None)
+            return self.send_json({"lead":lead,"events":list_lead_events(lead_id,company_id=company["id"] if company else None)} if lead else {"error":"lead not found"},200 if lead else 404)
         if path=="/api/tickets":
             company=company_from_request(self)
             if company:
@@ -1027,9 +1055,10 @@ class Handler(BaseHTTPRequestHandler):
             if not ticket: return self.send_json({"error":"ticket not found"},404)
             return self.send_json({"ticket":ticket,"events":list_ticket_events(tid)})
         if path=="/api/customers":
-            if not self.require(): return
+            company=company_from_request(self)
+            if not company and not self.require(): return
             search=parse_qs(urlparse(self.path).query).get("q",[""])[0]
-            return self.send_json({"customers":list_customers(search=search)})
+            return self.send_json({"customers":list_customers(search=search,company_id=company["id"] if company else None)})
         if path=="/api/stats":
             if not self.require(): return
             return self.send_json(stats())
@@ -1188,7 +1217,8 @@ class Handler(BaseHTTPRequestHandler):
                 CHAT_RATE[client]=recent
                 return self.send_json({"error":"Слишком много сообщений. Попробуйте через минуту."},429)
             CHAT_RATE[client]=recent+[now]
-            result=answer_question(p.get("message",""),p.get("name",""),p.get("email",""),p.get("conversation_id","")); return self.send_json(result)
+            company=company_from_request(self)
+            result=answer_question(p.get("message",""),p.get("name",""),p.get("email",""),p.get("conversation_id",""),company_id=company["id"] if company else None); return self.send_json(result)
         if path=="/api/leads":
             now=time.time()
             client=self.client_address[0]
