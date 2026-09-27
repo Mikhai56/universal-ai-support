@@ -328,6 +328,10 @@ def list_messages(conversation_id, limit=100, company_id=None):
 def answer_question(question, name="", email="", conversation_id="", company_id=None):
     question=redact_sensitive((question or "").strip())[:MAX_MESSAGE_CHARS]
     if not question: return {"answer":"Напишите вопрос одним сообщением.","status":"needs_clarification"}
+    if company_id is not None:
+        usage=company_usage(company_id)
+        if usage and usage["messages"]["used"] >= usage["messages"]["limit"]:
+            return {"answer":"Лимит сообщений текущего тарифа исчерпан. Перейдите на другой тариф в кабинете компании.","status":"limit_reached","usage":usage}
     conversation_id=ensure_conversation(name,email,conversation_id,company_id)
     save_message(conversation_id,"user",question,"received")
     reason=risky(question)
@@ -856,6 +860,72 @@ def commercial_login(email,password):
     conn.commit(); conn.close()
     return token,row(c)
 
+def company_usage(company_id):
+    conn=db(); pg=is_pg(conn); p="%s" if pg else "?"
+    c=conn.execute("SELECT plan FROM companies WHERE id="+p,(str(company_id),)).fetchone()
+    if not c:
+        conn.close(); return None
+    plan=str(c["plan"] or "free")
+    limits=PLANS.get(plan,PLANS["free"])
+    messages=int(conn.execute("SELECT COUNT(*) AS n FROM messages WHERE conversation_id IN (SELECT id FROM conversations WHERE company_id="+p+")",(str(company_id),)).fetchone()["n"])
+    operators=int(conn.execute("SELECT COUNT(*) AS n FROM company_members WHERE company_id="+p+" AND status='active'",(str(company_id),)).fetchone()["n"])
+    tickets=int(conn.execute("SELECT COUNT(*) AS n FROM tickets WHERE company_id="+p,(str(company_id),)).fetchone()["n"])
+    leads=int(conn.execute("SELECT COUNT(*) AS n FROM leads WHERE company_id="+p,(str(company_id),)).fetchone()["n"]) if _table_exists(conn,"leads") else 0
+    conn.close()
+    return {"plan":plan,"messages":{"used":messages,"limit":limits["messages"]},"operators":{"used":operators,"limit":limits["operators"]},"channels":{"limit":limits["channels"]},"tickets":tickets,"leads":leads}
+
+def _table_exists(conn,name):
+    try:
+        if is_pg(conn):
+            return bool(conn.execute("SELECT to_regclass(%s) AS t",(name,)).fetchone()["t"])
+        return bool(conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name=?",(name,)).fetchone())
+    except Exception:
+        return False
+
+def list_company_members(company_id):
+    conn=db(); p="%s" if is_pg(conn) else "?"
+    rs=conn.execute("SELECT id,email,role,status,created_at,updated_at FROM company_members WHERE company_id="+p+" ORDER BY id",(str(company_id),)).fetchall()
+    conn.close(); return [row(x) for x in rs]
+
+def add_company_member(company_id,email,role="operator"):
+    email=str(email or "").strip().lower()
+    if not re.fullmatch(r"[^@\\s]+@[^@\\s]+\\.[^@\\s]+",email): raise ValueError("Укажите корректный email")
+    if role not in {"admin","operator","viewer"}: raise ValueError("Недопустимая роль")
+    usage=company_usage(company_id)
+    if usage and usage["operators"]["used"] >= usage["operators"]["limit"]: raise ValueError("Лимит операторов текущего тарифа исчерпан")
+    conn=db(); pg=is_pg(conn); p="%s" if pg else "?"
+    try:
+        if pg: conn.execute("INSERT INTO company_members(company_id,email,role,status) VALUES(%s,%s,%s,'active')",(str(company_id),email,role))
+        else: conn.execute("INSERT INTO company_members(company_id,email,role,status,created_at,updated_at) VALUES(?,?,?,'active',datetime('now'),datetime('now'))",(str(company_id),email,role))
+        conn.commit()
+    except Exception as exc:
+        conn.close(); raise ValueError("Пользователь уже добавлен в компанию") from exc
+    conn.close(); return True
+
+def update_company_member(company_id,member_id,fields):
+    allowed={"role","status"}; fields={k:v for k,v in (fields or {}).items() if k in allowed}
+    if "role" in fields and fields["role"] not in {"owner","admin","operator","viewer"}: raise ValueError("Недопустимая роль")
+    if "status" in fields and fields["status"] not in {"active","disabled"}: raise ValueError("Недопустимый статус")
+    if not fields: return False
+    conn=db(); pg=is_pg(conn); p="%s" if pg else "?"
+    member=conn.execute("SELECT email,role FROM company_members WHERE id="+p+" AND company_id="+p,(int(member_id),str(company_id))).fetchone()
+    if not member: conn.close(); return False
+    if member["role"]=="owner" and fields.get("role")!="owner": conn.close(); raise ValueError("Владельца нельзя разжаловать")
+    sets=[]; vals=[]
+    for k,v in fields.items(): sets.append(k+"="+p); vals.append(v)
+    sets.append("updated_at="+("NOW()" if pg else "datetime('now')"))
+    vals.extend([int(member_id),str(company_id)])
+    conn.execute("UPDATE company_members SET "+", ".join(sets)+" WHERE id="+p+" AND company_id="+p,vals)
+    conn.commit(); conn.close(); return True
+
+def delete_company_member(company_id,member_id):
+    conn=db(); p="%s" if is_pg(conn) else "?"
+    member=conn.execute("SELECT role FROM company_members WHERE id="+p+" AND company_id="+p,(int(member_id),str(company_id))).fetchone()
+    if not member: conn.close(); return False
+    if member["role"]=="owner": conn.close(); raise ValueError("Владельца нельзя удалить")
+    conn.execute("DELETE FROM company_members WHERE id="+p+" AND company_id="+p,(int(member_id),str(company_id)))
+    conn.commit(); conn.close(); return True
+
 def commercial_subscribe(company_id,plan):
     if plan not in PLANS or plan=="free": raise ValueError("Недоступный тариф")
     env_key="STRIPE_CHECKOUT_"+plan.upper()+"_URL"
@@ -881,6 +951,14 @@ def commercial_get(handler,path):
         c=company_from_request(handler)
         if not c: return handler.send_json({"authenticated":False},200) or True
         return handler.send_json({"authenticated":True,"company":{"id":c["id"],"name":c["name"],"slug":c["slug"],"email":c["owner_email"],"plan":c["plan"],"subscription_status":c["subscription_status"],"trial_ends_at":c["trial_ends_at"],"status":c["status"]}})
+    if path=="/api/commercial/usage":
+        c=company_from_request(handler)
+        if not c: return handler.send_json({"error":"authentication required"},401) or True
+        return handler.send_json({"usage":company_usage(c["id"])})
+    if path=="/api/commercial/members":
+        c=company_from_request(handler)
+        if not c: return handler.send_json({"error":"authentication required"},401) or True
+        return handler.send_json({"members":list_company_members(c["id"])})
     return False
 
 def commercial_post(handler,path):
@@ -906,6 +984,13 @@ def commercial_post(handler,path):
         try:
             p=handler.body(); plan=str(p.get("plan","")).lower(); checkout=commercial_subscribe(c["id"],plan)
             return handler.send_json({"ok":True,"plan":plan,"checkout_url":checkout or None,"message":"Откройте оплату Stripe, когда она подключена."})
+        except ValueError as e: return handler.send_json({"error":str(e)},400)
+    if path=="/api/commercial/members":
+        c=company_from_request(handler)
+        if not c: return handler.send_json({"error":"authentication required"},401)
+        try:
+            p=handler.body(); add_company_member(c["id"],p.get("email"),p.get("role","operator"))
+            return handler.send_json({"ok":True,"members":list_company_members(c["id"])},201)
         except ValueError as e: return handler.send_json({"error":str(e)},400)
     return False
 
@@ -1027,6 +1112,14 @@ class Handler(BaseHTTPRequestHandler):
                     return self.send_json({"error":"invalid lead status"},400)
             company=company_from_request(self)
             return self.send_json({"leads":list_leads(status=status,search=search,company_id=company["id"] if company else None)})
+        if path.startswith("/api/commercial/members/"):
+            c=company_from_request(self)
+            if not c: return self.send_json({"error":"authentication required"},401)
+            try:
+                ok=update_company_member(c["id"],int(path.rsplit("/",1)[1]),self.body())
+            except (ValueError,TypeError) as e: return self.send_json({"error":str(e)},400)
+            return self.send_json({"ok":bool(ok)},200 if ok else 404)
+
         if path.startswith("/api/leads/"):
             company=company_from_request(self)
             if not company and not self.require(): return
@@ -1252,6 +1345,12 @@ class Handler(BaseHTTPRequestHandler):
         path=urlparse(self.path).path
         if not self._require_csrf():
             return
+        if path.startswith("/api/commercial/members/"):
+            c=company_from_request(self)
+            if not c: return self.send_json({"error":"authentication required"},401)
+            try: ok=delete_company_member(c["id"],int(path.rsplit("/",1)[1]))
+            except (ValueError,TypeError) as e: return self.send_json({"error":str(e)},400)
+            return self.send_json({"ok":bool(ok)},200 if ok else 404)
         if path.startswith("/api/operators/"):
             if not self.require("manage"): return
             from urllib.parse import unquote
