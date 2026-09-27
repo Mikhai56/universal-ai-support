@@ -357,7 +357,7 @@ def answer_question(question, name="", email="", conversation_id="", company_id=
     if answer:
         save_message(conversation_id,"assistant",answer,"answered")
         return {"answer":answer,"status":"answered","conversation_id":conversation_id,"source":source}
-    return {"answer":"Я не нашёл точного ответа в базе знаний. Уточните вопрос или передайте обращение менеджеру.","status":"needs_clarification","conversation_id":conversation_id}
+    clarification="Я не нашёл точного ответа в базе знаний. Уточните вопрос или передайте обращение менеджеру."\n    save_message(conversation_id,"assistant",clarification,"needs_clarification")\n    return {"answer":clarification,"status":"needs_clarification","conversation_id":conversation_id}
 
 def list_tickets(status=None, priority=None, search=None, assignee=None, unassigned=False, limit=100, company_id=None):
     if status is not None and status not in TICKET_STATUSES: raise ValueError("invalid ticket status")
@@ -618,7 +618,7 @@ def list_money_accounts():
         for t in txs:
             value=Decimal(str(t["amount"]))
             balance += value if t["kind"]=="credit" else -value
-        item=row(a); item["balance"]=format(balance,"f"); result.append(item)
+        item=row(a); item["balance"]=format(balance,".6f"); result.append(item)
     conn.close(); return result
 
 def create_money_account(name,currency="EUR"):
@@ -1175,7 +1175,7 @@ def list_company_members(company_id):
 
 def add_company_member(company_id,email,role="operator"):
     email=str(email or "").strip().lower()
-    if not re.fullmatch(r"[^@\\s]+@[^@\\s]+\\.[^@\\s]+",email): raise ValueError("Укажите корректный email")
+    if not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+",email): raise ValueError("Укажите корректный email")
     if role not in {"admin","operator","viewer"}: raise ValueError("Недопустимая роль")
     usage=company_usage(company_id)
     if usage and usage["operators"]["used"] >= usage["operators"]["limit"]: raise ValueError("Лимит операторов текущего тарифа исчерпан")
@@ -1214,7 +1214,7 @@ def delete_company_member(company_id,member_id):
 
 def create_company_invitation(company, email, role="operator"):
     email=str(email or "").strip().lower()
-    if not re.fullmatch(r"[^@\\s]+@[^@\\s]+\\.[^@\\s]+",email): raise ValueError("Укажите корректный email")
+    if not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+",email): raise ValueError("Укажите корректный email")
     if role not in {"admin","operator","viewer"}: raise ValueError("Недопустимая роль")
     usage=company_usage(company["id"])
     if usage and usage["operators"]["used"] >= usage["operators"]["limit"]: raise ValueError("Лимит участников текущего тарифа исчерпан")
