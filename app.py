@@ -308,6 +308,11 @@ def ensure_conversation(name="", email="", conversation_id="", company_id=None):
     found=conn.execute("SELECT id FROM conversations WHERE id="+p+scope,(cid,*scope_vals)).fetchone()
     if found:
         conn.execute("UPDATE conversations SET customer_name="+p+", customer_email="+p+", updated_at="+("NOW()" if pg else "datetime('now')")+" WHERE id="+p+scope,(name or None,email or None,cid,*scope_vals))
+    elif company_id is not None:
+        any_found=conn.execute("SELECT id FROM conversations WHERE id="+p,(cid,)).fetchone()
+        if any_found: cid=secrets.token_hex(16)
+        if pg: conn.execute("INSERT INTO conversations(id,company_id,customer_name,customer_email) VALUES(%s,%s,%s,%s)",(cid,company_id,name or None,email or None))
+        else: conn.execute("INSERT INTO conversations(id,company_id,customer_name,customer_email,created_at,updated_at) VALUES(?,?,?,?,?,?)",(cid,company_id,name or None,email or None,time.strftime("%Y-%m-%d %H:%M:%S"),time.strftime("%Y-%m-%d %H:%M:%S")))
     elif pg: conn.execute("INSERT INTO conversations(id,company_id,customer_name,customer_email) VALUES(%s,%s,%s,%s)",(cid,company_id,name or None,email or None))
     else: conn.execute("INSERT INTO conversations(id,company_id,customer_name,customer_email,created_at,updated_at) VALUES(?,?,?,?,?,?)",(cid,company_id,name or None,email or None,time.strftime("%Y-%m-%d %H:%M:%S"),time.strftime("%Y-%m-%d %H:%M:%S")))
     conn.commit(); conn.close(); return cid
@@ -1006,7 +1011,8 @@ class Handler(BaseHTTPRequestHandler):
                 if not exists: return self.send_json({"error":"conversation not found"},404)
             return self.send_json({"conversation_id":conversation_id,"messages":messages})
         if path=="/api/leads":
-            if not self.require(): return
+            company=company_from_request(self)
+            if not company and not self.require(): return
             from lead_pipeline import list_leads
             params=parse_qs(urlparse(self.path).query)
             status=params.get("status",[None])[0]
@@ -1018,7 +1024,8 @@ class Handler(BaseHTTPRequestHandler):
             company=company_from_request(self)
             return self.send_json({"leads":list_leads(status=status,search=search,company_id=company["id"] if company else None)})
         if path.startswith("/api/leads/"):
-            if not self.require(): return
+            company=company_from_request(self)
+            if not company and not self.require(): return
             from lead_pipeline import get_lead, list_lead_events
             lead_id=path.rsplit("/",1)[1]
             company=company_from_request(self)
@@ -1229,7 +1236,8 @@ class Handler(BaseHTTPRequestHandler):
             LEAD_RATE[client]=recent+[now]
             try:
                 from lead_pipeline import create_lead
-                lead_id=create_lead(p)
+                company=company_from_request(self)
+                lead_id=create_lead(p,company_id=company["id"] if company else None)
             except ValueError as e: return self.send_json({"error":str(e)},400)
             return self.send_json({"ok":True,"leadId":lead_id,"status":"NEW"},202)
         self.send_json({"error":"not found"},404)
@@ -1257,11 +1265,15 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_json({"ok":mark_notification_read(nid,s["email"])})
 
         if path.startswith("/api/leads/"):
-            s=self.require("write")
-            if not s: return
+            company=company_from_request(self)
+            s=self.require("write") if not company else None
+            if not company and not s: return
             try:
                 from lead_pipeline import update_lead
-                lead_id=path.rsplit("/",1)[1]; ok=update_lead(lead_id,self.body(),actor=s["email"])
+                lead_id=path.rsplit("/",1)[1]
+                body=self.body()
+                actor=company["owner_email"] if company else s["email"]
+                ok=update_lead(lead_id,body,actor=actor,company_id=company["id"] if company else None)
             except ValueError as e: return self.send_json({"error":str(e)},400)
             except Exception:
                 return self.send_json({"error":"lead update failed"},500)
