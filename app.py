@@ -882,6 +882,29 @@ def _table_exists(conn,name):
     except Exception:
         return False
 
+def company_member_role(company_id,email):
+    conn=db(); p="%s" if is_pg(conn) else "?"
+    try:
+        m=conn.execute("SELECT role FROM company_members WHERE company_id="+p+" AND lower(email)=lower("+p+") AND status='active'",(str(company_id),str(email or ""))).fetchone()
+        return str(m["role"]) if m else None
+    finally:
+        conn.close()
+
+def company_permission(company_id,email,permission="read"):
+    role=company_member_role(company_id,email)
+    if role=="owner":
+        return True
+    return permission in ROLE_PERMISSIONS.get(role,set())
+
+def require_company_permission(handler,company,permission="read"):
+    if not company:
+        handler.send_json({"error":"authentication required"},401)
+        return False
+    if not company_permission(company["id"],company["owner_email"],permission):
+        handler.send_json({"error":"forbidden"},403)
+        return False
+    return True
+
 def list_company_members(company_id):
     conn=db(); p="%s" if is_pg(conn) else "?"
     rs=conn.execute("SELECT id,email,role,status,created_at,updated_at FROM company_members WHERE company_id="+p+" ORDER BY id",(str(company_id),)).fetchall()
@@ -1114,7 +1137,7 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_json({"leads":list_leads(status=status,search=search,company_id=company["id"] if company else None)})
         if path.startswith("/api/commercial/members/"):
             c=company_from_request(self)
-            if not c: return self.send_json({"error":"authentication required"},401)
+            if not require_company_permission(self,c,"manage"): return
             try:
                 ok=update_company_member(c["id"],int(path.rsplit("/",1)[1]),self.body())
             except (ValueError,TypeError) as e: return self.send_json({"error":str(e)},400)
@@ -1122,7 +1145,8 @@ class Handler(BaseHTTPRequestHandler):
 
         if path.startswith("/api/leads/"):
             company=company_from_request(self)
-            if not company and not self.require(): return
+            if company and not require_company_permission(self,company,"write"): return
+            if not company and not self.require("write"): return
             from lead_pipeline import get_lead, list_lead_events
             lead_id=path.rsplit("/",1)[1]
             company=company_from_request(self)
@@ -1325,6 +1349,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json({"error":"Слишком много сообщений. Попробуйте через минуту."},429)
             CHAT_RATE[client]=recent+[now]
             company=company_from_request(self)
+            if company and not require_company_permission(self,company,"write"): return
             result=answer_question(p.get("message",""),p.get("name",""),p.get("email",""),p.get("conversation_id",""),company_id=company["id"] if company else None); return self.send_json(result)
         if path=="/api/leads":
             now=time.time()
@@ -1337,6 +1362,7 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 from lead_pipeline import create_lead
                 company=company_from_request(self)
+                if company and not require_company_permission(self,company,"write"): return
                 lead_id=create_lead(p,company_id=company["id"] if company else None)
             except ValueError as e: return self.send_json({"error":str(e)},400)
             return self.send_json({"ok":True,"leadId":lead_id,"status":"NEW"},202)
@@ -1347,7 +1373,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path.startswith("/api/commercial/members/"):
             c=company_from_request(self)
-            if not c: return self.send_json({"error":"authentication required"},401)
+            if not require_company_permission(self,c,"manage"): return
             try: ok=delete_company_member(c["id"],int(path.rsplit("/",1)[1]))
             except (ValueError,TypeError) as e: return self.send_json({"error":str(e)},400)
             return self.send_json({"ok":bool(ok)},200 if ok else 404)
@@ -1389,6 +1415,7 @@ class Handler(BaseHTTPRequestHandler):
         if path.startswith("/api/tickets/"):
             company=company_from_request(self)
             if company:
+                if not require_company_permission(self,company,"write"): return
                 try: tid=int(path.rsplit("/",1)[1]); ok=update_ticket(tid,self.body(),actor=company["owner_email"],company_id=company["id"])
                 except ValueError as e: return self.send_json({"error":str(e)},400)
                 except Exception: return self.send_json({"error":"ticket update failed"},500)
