@@ -233,7 +233,12 @@ def words(text):
     stop={"как","какой","какая","какие","что","это","есть","ли","вы","можно","нужно","для","при","по","на","мне","про"}
     return {w for w in re.findall(r"[a-zа-яё0-9]+", text.lower()) if len(w)>2 and w not in stop}
 
-def local_answer(question):
+def local_answer(question, company_id=None):
+    if company_id is not None:
+        tenant=tenant_local_answer(question,company_id)
+        if tenant[0] is not None:
+            return tenant
+
     q=question.lower(); qw=words(q); best=None; score=0
     for item in KB:
         for pattern in item.get("questions",[])+item.get("keywords",[]):
@@ -281,9 +286,11 @@ def create_ticket(question,answer,status,reason="",customer_name="",customer_ema
         create_notification("ticket","Новое обращение требует внимания",f"Обращение #{tid}: {reason or status}",tid,conn=conn)
     conn.commit(); conn.close(); return tid
 
-def ai_answer(question):
+def ai_answer(question, company_id=None):
+
     if not AI_API_KEY: return None
-    context=json.dumps(KB,ensure_ascii=False)
+    context=json.dumps(tenant_kb_context(company_id) if company_id is not None else KB,ensure_ascii=False)
+
     payload={"model":AI_MODEL,"temperature":.2,"messages":[
       {"role":"system","content":"Ты SupportPilot — оператор поддержки интернет-магазина. Отвечай только на основе базы знаний. Не выдумывай цены, сроки, наличие, статусы заказов или правила. Если данных нет — скажи, что нужен менеджер. Никогда не проси пароль, CVV или полные реквизиты карты. Отвечай кратко и по-русски.\nБАЗА ЗНАНИЙ:\n"+context},
       {"role":"user","content":question}]}
@@ -343,12 +350,12 @@ def answer_question(question, name="", email="", conversation_id="", company_id=
         ticket_id=create_ticket(question,answer,"escalated",reason,name,email,company_id=company_id)
         save_message(conversation_id,"assistant",answer,"escalated",ticket_id)
         return {"answer":answer,"status":"escalated","ticket_id":ticket_id,"conversation_id":conversation_id}
-    answer,topic,must_escalate,source=local_answer(question)
+    answer,topic,must_escalate,source=local_answer(question,company_id)
     if answer and must_escalate:
         ticket_id=create_ticket(question,answer,"escalated",topic,name,email,company_id=company_id)
         save_message(conversation_id,"assistant",answer,"escalated",ticket_id)
         return {"answer":answer,"status":"escalated","ticket_id":ticket_id,"conversation_id":conversation_id,"source":source}
-    ai=ai_answer(question)
+    ai=ai_answer(question,company_id)
     if ai:
         save_message(conversation_id,"assistant",ai,"answered")
         return {"answer":ai,"status":"answered","conversation_id":conversation_id,"source":source or "AI"}
@@ -871,6 +878,19 @@ def init_commercial_db(conn=None):
           created_at TEXT NOT NULL, accepted_at TEXT)""")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_company_invites_company ON company_invitations(company_id,status)")
         conn.execute("UPDATE company_members SET password_hash=(SELECT password_hash FROM companies c WHERE c.id=company_members.company_id) WHERE role='owner' AND password_hash IS NULL")
+    if pg:
+        conn.execute("""CREATE TABLE IF NOT EXISTS company_kb(
+          id BIGSERIAL PRIMARY KEY, company_id TEXT NOT NULL, title TEXT NOT NULL,
+          content TEXT NOT NULL, source TEXT, status TEXT NOT NULL DEFAULT 'active',
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())""")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_company_kb_company ON company_kb(company_id,status)")
+    else:
+        conn.execute("""CREATE TABLE IF NOT EXISTS company_kb(
+          id INTEGER PRIMARY KEY AUTOINCREMENT, company_id TEXT NOT NULL, title TEXT NOT NULL,
+          content TEXT NOT NULL, source TEXT, status TEXT NOT NULL DEFAULT 'active',
+          created_at TEXT NOT NULL, updated_at TEXT NOT NULL)""")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_company_kb_company ON company_kb(company_id,status)")
+
     if own:
         conn.commit(); conn.close()
 
@@ -974,6 +994,68 @@ def commercial_login(email,password):
                         VALUES(?,?,?,?,?,?,?)""",(token,m["company_id"],m["id"],m["email"],m["role"],exp,now))
     conn.commit(); conn.close()
     return token,{"id":m["company_id"],"name":m["name"],"slug":m["slug"],"plan":m["plan"],"subscription_status":m["subscription_status"],"member_id":m["id"],"member_email":m["email"],"member_role":m["role"],"owner_email":m["email"] if m["role"]=="owner" else None}
+
+def company_kb_items(company_id, include_disabled=False):
+    conn=db(); p="%s" if is_pg(conn) else "?"
+    where="company_id="+p
+    vals=[str(company_id)]
+    if not include_disabled:
+        where+=" AND status='active'"
+    rs=conn.execute("SELECT * FROM company_kb WHERE "+where+" ORDER BY id DESC",tuple(vals)).fetchall()
+    conn.close(); return [row(x) for x in rs]
+
+def create_company_kb(company_id,title,content,source=""):
+    title=str(title or "").strip()[:200]; content=str(content or "").strip()[:20000]; source=str(source or "").strip()[:500]
+    if len(title)<2: raise ValueError("Укажите название материала")
+    if len(content)<3: raise ValueError("Добавьте содержание материала")
+    conn=db(); pg=is_pg(conn)
+    if pg:
+        conn.execute("INSERT INTO company_kb(company_id,title,content,source,status) VALUES(%s,%s,%s,%s,'active')",(str(company_id),title,content,source or None))
+    else:
+        now=time.strftime("%Y-%m-%d %H:%M:%S")
+        conn.execute("INSERT INTO company_kb(company_id,title,content,source,status,created_at,updated_at) VALUES(?,?,?,?, 'active',?,?)",(str(company_id),title,content,source or None,now,now))
+    conn.commit(); conn.close(); return True
+
+def update_company_kb(company_id,item_id,fields):
+    fields={k:v for k,v in (fields or {}).items() if k in {"title","content","source","status"}}
+    if "title" in fields:
+        fields["title"]=str(fields["title"] or "").strip()[:200]
+        if len(fields["title"])<2: raise ValueError("Укажите название материала")
+    if "content" in fields:
+        fields["content"]=str(fields["content"] or "").strip()[:20000]
+        if len(fields["content"])<3: raise ValueError("Добавьте содержание материала")
+    if "source" in fields: fields["source"]=str(fields["source"] or "").strip()[:500]
+    if "status" in fields and fields["status"] not in {"active","disabled"}: raise ValueError("Недопустимый статус")
+    if not fields: return False
+    conn=db(); pg=is_pg(conn); p="%s" if pg else "?"
+    item=conn.execute("SELECT id FROM company_kb WHERE id="+p+" AND company_id="+p,(int(item_id),str(company_id))).fetchone()
+    if not item: conn.close(); return False
+    sets=[]; vals=[]
+    for k,v in fields.items(): sets.append(k+"="+p); vals.append(v)
+    sets.append("updated_at="+("NOW()" if pg else "datetime('now')"))
+    vals.extend([int(item_id),str(company_id)])
+    conn.execute("UPDATE company_kb SET "+", ".join(sets)+" WHERE id="+p+" AND company_id="+p,vals)
+    conn.commit(); conn.close(); return True
+
+def delete_company_kb(company_id,item_id):
+    conn=db(); p="%s" if is_pg(conn) else "?"
+    conn.execute("DELETE FROM company_kb WHERE id="+p+" AND company_id="+p,(int(item_id),str(company_id)))
+    changed=conn.total_changes
+    conn.commit(); conn.close(); return bool(changed)
+
+def tenant_local_answer(question,company_id):
+    qw=words(question); best=None; score=0
+    for item in company_kb_items(company_id):
+        text=(item.get("title","")+" "+item.get("content","")).strip()
+        pw=words(text)
+        s=len(qw & pw)/max(1,len(qw))
+        if s>score: best,score=item,s
+    if best and score>=.35:
+        return best.get("content",""),best.get("title","База знаний"),False,best.get("source")
+    return None,"unknown",False,None
+
+def tenant_kb_context(company_id):
+    return company_kb_items(company_id)
 
 def company_usage(company_id):
     conn=db(); pg=is_pg(conn); p="%s" if pg else "?"
@@ -1197,6 +1279,15 @@ def commercial_get(handler,path):
     return False
 
 def commercial_post(handler,path):
+    if path=="/api/kb":
+        c=company_from_request(handler)
+        if not require_company_permission(handler,c,"manage"): return
+        try:
+            p=handler.body()
+            create_company_kb(c["id"],p.get("title"),p.get("content"),p.get("source",""))
+            return handler.send_json({"ok":True,"items":company_kb_items(c["id"])},201)
+        except ValueError as e:
+            return handler.send_json({"error":str(e)},400)
     if path=="/api/commercial/invitations":
         c=company_from_request(handler)
         if not require_company_permission(handler,c,"manage"): return
@@ -1337,6 +1428,9 @@ class Handler(BaseHTTPRequestHandler):
             op=next((x for x in list_operators() if x["email"]==email.lower()),None)
             return self.send_json({"operator":op} if op else {"error":"operator not found"},200 if op else 404)
         if path=="/api/kb":
+            company=company_from_request(self)
+            if company:
+                return self.send_json({"items":company_kb_items(company["id"]),"count":len(company_kb_items(company["id"]))})
             return self.send_json({"items":KB,"count":len(KB)})
         if path.startswith("/api/conversations/") and path.endswith("/messages"):
             company=company_from_request(self)
@@ -1362,6 +1456,15 @@ class Handler(BaseHTTPRequestHandler):
                     return self.send_json({"error":"invalid lead status"},400)
             company=company_from_request(self)
             return self.send_json({"leads":list_leads(status=status,search=search,company_id=company["id"] if company else None)})
+        if path.startswith("/api/kb/"):
+            c=company_from_request(self)
+            if not require_company_permission(self,c,"manage"): return
+            try:
+                item_id=int(path.rsplit("/",1)[1])
+                ok=update_company_kb(c["id"],item_id,self.body())
+                return self.send_json({"ok":bool(ok),"items":company_kb_items(c["id"])},200 if ok else 404)
+            except (ValueError,TypeError) as e:
+                return self.send_json({"error":str(e)},400)
         if path.startswith("/api/commercial/members/"):
             c=company_from_request(self)
             if not require_company_permission(self,c,"manage"): return
@@ -1602,6 +1705,16 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_json({"ok":True,"leadId":lead_id,"status":"NEW"},202)
         self.send_json({"error":"not found"},404)
     def do_DELETE(self):
+        if path.startswith("/api/kb/"):
+            c=company_from_request(self)
+            if not require_company_permission(self,c,"manage"): return
+            try:
+                item_id=int(path.rsplit("/",1)[1])
+                ok=delete_company_kb(c["id"],item_id)
+                return self.send_json({"ok":bool(ok)},200 if ok else 404)
+            except (ValueError,TypeError) as e:
+                return self.send_json({"error":str(e)},400)
+
         path=urlparse(self.path).path
         if not self._require_csrf():
             return
