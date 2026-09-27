@@ -745,8 +745,8 @@ def init_commercial_db(conn=None):
           trial_ends_at TIMESTAMPTZ, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
           updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())""")
         conn.execute("""CREATE TABLE IF NOT EXISTS company_sessions(
-          token TEXT PRIMARY KEY, company_id TEXT NOT NULL, expires_at TIMESTAMPTZ NOT NULL,
-          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())""")
+          token TEXT PRIMARY KEY, company_id TEXT NOT NULL, member_id BIGINT, member_email TEXT, member_role TEXT,
+          expires_at TIMESTAMPTZ NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())""")
         conn.execute("""CREATE TABLE IF NOT EXISTS company_subscriptions(
           id BIGSERIAL PRIMARY KEY, company_id TEXT NOT NULL, plan TEXT NOT NULL,
           status TEXT NOT NULL, provider TEXT NOT NULL DEFAULT 'internal',
@@ -755,7 +755,7 @@ def init_commercial_db(conn=None):
           updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())""")
         conn.execute("""CREATE TABLE IF NOT EXISTS company_members(
           id BIGSERIAL PRIMARY KEY, company_id TEXT NOT NULL, email TEXT NOT NULL,
-          role TEXT NOT NULL DEFAULT 'owner', status TEXT NOT NULL DEFAULT 'active',
+          password_hash TEXT, role TEXT NOT NULL DEFAULT 'owner', status TEXT NOT NULL DEFAULT 'active',
           created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
           updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
           UNIQUE(company_id,email),
@@ -768,8 +768,8 @@ def init_commercial_db(conn=None):
           subscription_status TEXT NOT NULL DEFAULT 'trialing',
           trial_ends_at TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)""")
         conn.execute("""CREATE TABLE IF NOT EXISTS company_sessions(
-          token TEXT PRIMARY KEY, company_id TEXT NOT NULL, expires_at TEXT NOT NULL,
-          created_at TEXT NOT NULL)""")
+          token TEXT PRIMARY KEY, company_id TEXT NOT NULL, member_id INTEGER, member_email TEXT, member_role TEXT,
+          expires_at TEXT NOT NULL, created_at TEXT NOT NULL)""")
         conn.execute("""CREATE TABLE IF NOT EXISTS company_subscriptions(
           id INTEGER PRIMARY KEY AUTOINCREMENT, company_id TEXT NOT NULL, plan TEXT NOT NULL,
           status TEXT NOT NULL, provider TEXT NOT NULL DEFAULT 'internal',
@@ -777,10 +777,35 @@ def init_commercial_db(conn=None):
           current_period_end TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)""")
         conn.execute("""CREATE TABLE IF NOT EXISTS company_members(
           id INTEGER PRIMARY KEY AUTOINCREMENT, company_id TEXT NOT NULL, email TEXT NOT NULL,
-          role TEXT NOT NULL DEFAULT 'owner', status TEXT NOT NULL DEFAULT 'active',
+          password_hash TEXT, role TEXT NOT NULL DEFAULT 'owner', status TEXT NOT NULL DEFAULT 'active',
           created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
           UNIQUE(company_id,email),
           CHECK (role IN ('owner','admin','operator','viewer')))""")
+    if pg:
+        conn.execute("ALTER TABLE company_sessions ADD COLUMN IF NOT EXISTS member_id BIGINT")
+        conn.execute("ALTER TABLE company_sessions ADD COLUMN IF NOT EXISTS member_email TEXT")
+        conn.execute("ALTER TABLE company_sessions ADD COLUMN IF NOT EXISTS member_role TEXT")
+        conn.execute("ALTER TABLE company_members ADD COLUMN IF NOT EXISTS password_hash TEXT")
+        conn.execute("""CREATE TABLE IF NOT EXISTS company_invitations(
+          id BIGSERIAL PRIMARY KEY, company_id TEXT NOT NULL, email TEXT NOT NULL,
+          role TEXT NOT NULL, token_hash TEXT UNIQUE NOT NULL, inviter_email TEXT NOT NULL,
+          status TEXT NOT NULL DEFAULT 'pending', expires_at TIMESTAMPTZ NOT NULL,
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), accepted_at TIMESTAMPTZ)""")
+        conn.execute("UPDATE company_members SET password_hash=(SELECT password_hash FROM companies c WHERE c.id=company_members.company_id) WHERE role='owner' AND password_hash IS NULL")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_company_invites_company ON company_invitations(company_id,status)")
+    else:
+        cols={r["name"] for r in conn.execute("PRAGMA table_info(company_sessions)").fetchall()}
+        for col in ("member_id","member_email","member_role"):
+            if col not in cols: conn.execute("ALTER TABLE company_sessions ADD COLUMN "+col+(" INTEGER" if col=="member_id" else " TEXT"))
+        mcols={r["name"] for r in conn.execute("PRAGMA table_info(company_members)").fetchall()}
+        if "password_hash" not in mcols: conn.execute("ALTER TABLE company_members ADD COLUMN password_hash TEXT")
+        conn.execute("""CREATE TABLE IF NOT EXISTS company_invitations(
+          id INTEGER PRIMARY KEY AUTOINCREMENT, company_id TEXT NOT NULL, email TEXT NOT NULL,
+          role TEXT NOT NULL, token_hash TEXT UNIQUE NOT NULL, inviter_email TEXT NOT NULL,
+          status TEXT NOT NULL DEFAULT 'pending', expires_at TEXT NOT NULL,
+          created_at TEXT NOT NULL, accepted_at TEXT)""")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_company_invites_company ON company_invitations(company_id,status)")
+        conn.execute("UPDATE company_members SET password_hash=(SELECT password_hash FROM companies c WHERE c.id=company_members.company_id) WHERE role='owner' AND password_hash IS NULL")
     if own:
         conn.commit(); conn.close()
 
@@ -804,11 +829,23 @@ def company_from_request(handler):
             token=part.split("=",1)[1]
             break
     if not token: return None
-    conn=db()
-    p="%s" if is_pg(conn) else "?"
+    conn=db(); p="%s" if is_pg(conn) else "?"
     try:
-        rs=conn.execute("SELECT c.* FROM company_sessions s JOIN companies c ON c.id=s.company_id WHERE s.token="+p+" AND s.expires_at>"+("NOW()" if is_pg(conn) else "datetime('now')"),(token,)).fetchone()
-        return row(rs) if rs else None
+        q="""SELECT c.*, s.member_id, COALESCE(s.member_email,c.owner_email) AS member_email,
+                     COALESCE(s.member_role, m.role, 'owner') AS member_role
+             FROM company_sessions s
+             JOIN companies c ON c.id=s.company_id
+             LEFT JOIN company_members m ON m.id=s.member_id
+             WHERE s.token="""+p+""" AND s.expires_at>"""+("NOW()" if is_pg(conn) else "datetime('now')")
+        rs=conn.execute(q,(token,)).fetchone()
+        if not rs: return None
+        c=row(rs)
+        if c.get("member_id") is not None and c.get("member_role") is None: return None
+        if c.get("member_role")=="owner" and c.get("member_email","").lower()!=c.get("owner_email","").lower():
+            # A non-owner must always resolve to an actual active member.
+            m=conn.execute("SELECT id,email,role,status FROM company_members WHERE id="+p,(c["member_id"],)).fetchone()
+            if not m or m["status"]!="active": return None
+        return c
     finally:
         conn.close()
 
@@ -843,25 +880,35 @@ def commercial_register(name,email,password):
         conn.execute("INSERT INTO company_subscriptions(company_id,plan,status,current_period_end,created_at,updated_at) VALUES(?,?,?,?,?,?)",(cid,"free","trialing",trial,now,now))
     # Register the company owner as the first tenant member.
     if pg:
-        conn.execute("INSERT INTO company_members(company_id,email,role,status) VALUES(%s,%s,%s,%s)",(cid,email,"owner","active"))
+        conn.execute("INSERT INTO company_members(company_id,email,password_hash,role,status) VALUES(%s,%s,%s,%s,%s)",(cid,email,hash_password(password),"owner","active"))
     else:
-        conn.execute("INSERT INTO company_members(company_id,email,role,status,created_at,updated_at) VALUES(?,?,?,?,?,?)",(cid,email,"owner","active",now,now))
+        conn.execute("INSERT INTO company_members(company_id,email,password_hash,role,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?)",(cid,email,hash_password(password),"owner","active",now,now))
     conn.commit()
     conn.close()
     return cid
 
 def commercial_login(email,password):
+    email=str(email or "").strip().lower()
     conn=db(); p="%s" if is_pg(conn) else "?"
-    c=conn.execute("SELECT * FROM companies WHERE owner_email="+p,(str(email or "").strip().lower(),)).fetchone()
-    if not c or not verify_password(password,c["password_hash"]):
+    m=conn.execute("""SELECT m.*,c.name,c.slug,c.plan,c.subscription_status,c.status AS company_status
+                      FROM company_members m JOIN companies c ON c.id=m.company_id
+                      WHERE lower(m.email)=lower("""+p+""") AND m.status='active'""",(email,)).fetchone()
+    if not m or not m["password_hash"] or not verify_password(password,m["password_hash"]):
         conn.close(); raise ValueError("Неверный email или пароль")
+    if m["company_status"]!="active":
+        conn.close(); raise ValueError("Компания заблокирована")
     token=commercial_token()
     if is_pg(conn):
-        conn.execute("INSERT INTO company_sessions(token,company_id,expires_at) VALUES(%s,%s,NOW()+INTERVAL '30 days')",(token,c["id"]))
+        conn.execute("""INSERT INTO company_sessions(token,company_id,member_id,member_email,member_role,expires_at)
+                        VALUES(%s,%s,%s,%s,%s,NOW()+INTERVAL '30 days')""",
+                     (token,m["company_id"],m["id"],m["email"],m["role"]))
     else:
-        conn.execute("INSERT INTO company_sessions(token,company_id,expires_at,created_at) VALUES(?,?,?,datetime('now'))",(token,c["id"],time.strftime("%Y-%m-%d %H:%M:%S",time.localtime(time.time()+COMMERCIAL_SESSION_TTL)),time.strftime("%Y-%m-%d %H:%M:%S")))
+        now=time.strftime("%Y-%m-%d %H:%M:%S")
+        exp=time.strftime("%Y-%m-%d %H:%M:%S",time.localtime(time.time()+COMMERCIAL_SESSION_TTL))
+        conn.execute("""INSERT INTO company_sessions(token,company_id,member_id,member_email,member_role,expires_at,created_at)
+                        VALUES(?,?,?,?,?,?,?)""",(token,m["company_id"],m["id"],m["email"],m["role"],exp,now))
     conn.commit(); conn.close()
-    return token,row(c)
+    return token,{"id":m["company_id"],"name":m["name"],"slug":m["slug"],"plan":m["plan"],"subscription_status":m["subscription_status"],"member_id":m["id"],"member_email":m["email"],"member_role":m["role"],"owner_email":m["email"] if m["role"]=="owner" else None}
 
 def company_usage(company_id):
     conn=db(); pg=is_pg(conn); p="%s" if pg else "?"
@@ -903,7 +950,7 @@ def require_company_permission(handler,company,permission="read"):
     if not company:
         handler.send_json({"error":"authentication required"},401)
         return False
-    if not company_permission(company["id"],company["owner_email"],permission):
+    if not company_permission(company["id"],company.get("member_email") or company.get("owner_email"),permission):
         handler.send_json({"error":"forbidden"},403)
         return False
     return True
@@ -952,6 +999,82 @@ def delete_company_member(company_id,member_id):
     conn.execute("DELETE FROM company_members WHERE id="+p+" AND company_id="+p,(int(member_id),str(company_id)))
     conn.commit(); conn.close(); return True
 
+def create_company_invitation(company, email, role="operator"):
+    email=str(email or "").strip().lower()
+    if not re.fullmatch(r"[^@\\s]+@[^@\\s]+\\.[^@\\s]+",email): raise ValueError("Укажите корректный email")
+    if role not in {"admin","operator","viewer"}: raise ValueError("Недопустимая роль")
+    usage=company_usage(company["id"])
+    if usage and usage["operators"]["used"] >= usage["operators"]["limit"]: raise ValueError("Лимит участников текущего тарифа исчерпан")
+    conn=db(); pg=is_pg(conn); p="%s" if pg else "?"
+    try:
+        existing=conn.execute("SELECT role,status FROM company_members WHERE company_id="+p+" AND lower(email)=lower("+p+")",(company["id"],email)).fetchone()
+        if existing and existing["status"]=="active": raise ValueError("Пользователь уже является участником компании")
+        token=secrets.token_urlsafe(32); token_hash=hashlib.sha256(token.encode()).hexdigest()
+        if pg:
+            conn.execute("UPDATE company_invitations SET status='revoked' WHERE company_id=%s AND lower(email)=lower(%s) AND status='pending'",(company["id"],email))
+            conn.execute("""INSERT INTO company_invitations(company_id,email,role,token_hash,inviter_email,expires_at)
+                            VALUES(%s,%s,%s,%s,%s,NOW()+INTERVAL '7 days')""",(company["id"],email,role,token_hash,company.get("member_email") or company["owner_email"]))
+        else:
+            now=time.strftime("%Y-%m-%d %H:%M:%S"); exp=time.strftime("%Y-%m-%d %H:%M:%S",time.localtime(time.time()+7*86400))
+            conn.execute("UPDATE company_invitations SET status='revoked' WHERE company_id=? AND lower(email)=lower(?) AND status='pending'",(company["id"],email))
+            conn.execute("""INSERT INTO company_invitations(company_id,email,role,token_hash,inviter_email,expires_at,created_at)
+                            VALUES(?,?,?,?,?,?,?)""",(company["id"],email,role,token_hash,company.get("member_email") or company["owner_email"],exp,now))
+        conn.commit()
+        return token
+    finally:
+        conn.close()
+
+def list_company_invitations(company_id):
+    conn=db(); p="%s" if is_pg(conn) else "?"
+    rs=conn.execute("SELECT id,email,role,status,inviter_email,expires_at,created_at,accepted_at FROM company_invitations WHERE company_id="+p+" ORDER BY id DESC",(str(company_id),)).fetchall()
+    conn.close(); return [row(x) for x in rs]
+
+def accept_company_invitation(token,password):
+    token=str(token or "").strip()
+    if not token: raise ValueError("Недействительная ссылка приглашения")
+    validate_password(password)
+    token_hash=hashlib.sha256(token.encode()).hexdigest()
+    conn=db(); pg=is_pg(conn); p="%s" if pg else "?"
+    try:
+        inv=conn.execute("""SELECT * FROM company_invitations
+                            WHERE token_hash="""+p+""" AND status='pending' AND expires_at>"""+("NOW()" if pg else "datetime('now')"),(token_hash,)).fetchone()
+        if not inv: raise ValueError("Приглашение недействительно или истекло")
+        existing=conn.execute("SELECT id,role,status FROM company_members WHERE company_id="+p+" AND lower(email)=lower("+p+")",(inv["company_id"],inv["email"])).fetchone()
+        now=time.strftime("%Y-%m-%d %H:%M:%S")
+        if existing:
+            if existing["role"]=="owner": raise ValueError("Этот email уже является владельцем")
+            if pg:
+                conn.execute("UPDATE company_members SET password_hash=%s,role=%s,status='active',updated_at=NOW() WHERE id=%s",(hash_password(password),inv["role"],existing["id"]))
+            else:
+                conn.execute("UPDATE company_members SET password_hash=?,role=?,status='active',updated_at=datetime('now') WHERE id=?",(hash_password(password),inv["role"],existing["id"]))
+            member_id=existing["id"]
+        else:
+            if pg:
+                cur=conn.execute("""INSERT INTO company_members(company_id,email,password_hash,role,status)
+                                    VALUES(%s,%s,%s,%s,'active') RETURNING id""",(inv["company_id"],inv["email"],hash_password(password),inv["role"]))
+                member_id=cur.fetchone()["id"]
+            else:
+                cur=conn.execute("""INSERT INTO company_members(company_id,email,password_hash,role,status,created_at,updated_at)
+                                    VALUES(?,?,?,?, 'active',?,?)""",(inv["company_id"],inv["email"],hash_password(password),inv["role"],now,now))
+                member_id=cur.lastrowid
+        if pg:
+            conn.execute("UPDATE company_invitations SET status='accepted',accepted_at=NOW() WHERE id=%s",(inv["id"],))
+        else:
+            conn.execute("UPDATE company_invitations SET status='accepted',accepted_at=datetime('now') WHERE id=?",(inv["id"],))
+        token2=commercial_token()
+        if pg:
+            conn.execute("""INSERT INTO company_sessions(token,company_id,member_id,member_email,member_role,expires_at)
+                            VALUES(%s,%s,%s,%s,%s,NOW()+INTERVAL '30 days')""",(token2,inv["company_id"],member_id,inv["email"],inv["role"]))
+        else:
+            exp=time.strftime("%Y-%m-%d %H:%M:%S",time.localtime(time.time()+COMMERCIAL_SESSION_TTL))
+            conn.execute("""INSERT INTO company_sessions(token,company_id,member_id,member_email,member_role,expires_at,created_at)
+                            VALUES(?,?,?,?,?,?,?)""",(token2,inv["company_id"],member_id,inv["email"],inv["role"],exp,now))
+        conn.commit()
+        c=conn.execute("SELECT * FROM companies WHERE id="+p,(inv["company_id"],)).fetchone()
+        return token2,row(c)
+    finally:
+        conn.close()
+
 def commercial_subscribe(company_id,plan):
     if plan not in PLANS or plan=="free": raise ValueError("Недоступный тариф")
     env_key="STRIPE_CHECKOUT_"+plan.upper()+"_URL"
@@ -968,6 +1091,9 @@ def commercial_subscribe(company_id,plan):
     return checkout
 
 def commercial_get(handler,path):
+    if path=="/invite":
+        p=parse_qs(urlparse(handler.path).query).get("token",[""])[0]
+        return handler.serve_static("invite.html") if not p else handler.serve_static("invite.html")
     if path in ("/pricing","/register","/client","/account","/login-client"):
         files={"/pricing":"pricing.html","/register":"register.html","/client":"account.html","/account":"account.html","/login-client":"register.html"}
         fname=files.get(path,"pricing.html")
@@ -981,13 +1107,34 @@ def commercial_get(handler,path):
         c=company_from_request(handler)
         if not c: return handler.send_json({"error":"authentication required"},401) or True
         return handler.send_json({"usage":company_usage(c["id"])})
+    if path=="/api/commercial/invitations":
+        c=company_from_request(handler)
+        if not c: return handler.send_json({"error":"authentication required"},401)
+        if not require_company_permission(handler,c,"manage"): return
+        return handler.send_json({"invitations":list_company_invitations(c["id"])})
+
     if path=="/api/commercial/members":
         c=company_from_request(handler)
-        if not c: return handler.send_json({"error":"authentication required"},401) or True
+        if not require_company_permission(handler,c,"manage"): return or True
         return handler.send_json({"members":list_company_members(c["id"])})
     return False
 
 def commercial_post(handler,path):
+    if path=="/api/commercial/invitations":
+        c=company_from_request(handler)
+        if not require_company_permission(handler,c,"manage"): return
+        try:
+            p=handler.body(); token=create_company_invitation(c,p.get("email"),p.get("role","operator"))
+            host=handler.headers.get("Host","")
+            scheme="https" if SECURE_COOKIES else "http"
+            return handler.send_json({"ok":True,"email":str(p.get("email","")).strip().lower(),"role":p.get("role","operator"),"invite_url":scheme+"://"+host+"/invite?token="+token},201)
+        except ValueError as e: return handler.send_json({"error":str(e)},400)
+    if path=="/api/commercial/invitations/accept":
+        try:
+            p=handler.body(); token,c=accept_company_invitation(p.get("token"),p.get("password"))
+            handler._set_commercial_cookie=token
+            return handler.send_json({"ok":True,"company":{"id":c["id"],"name":c["name"],"plan":c["plan"],"subscription_status":c["subscription_status"],"member_id":c.get("member_id"),"member_email":c.get("member_email"),"member_role":c.get("member_role","owner")}})
+        except ValueError as e: return handler.send_json({"ok":False,"error":str(e)},400)
     if path=="/api/commercial/register":
         try:
             p=handler.body(); cid=commercial_register(p.get("company"),p.get("email"),p.get("password"))
@@ -1224,7 +1371,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         self._set_session_cookie=""
         path=urlparse(self.path).path
-        if path not in ("/api/login","/api/setup-admin","/api/chat","/api/leads","/api/commercial/register","/api/commercial/login","/api/commercial/logout","/api/commercial/subscribe") and not self._require_csrf():
+        if path not in ("/api/login","/api/setup-admin","/api/chat","/api/leads","/api/commercial/register","/api/commercial/login","/api/commercial/logout","/api/commercial/subscribe","/api/commercial/invitations","/api/commercial/invitations/accept") and not self._require_csrf():
             return
         if commercial_post(self,path): return
         try: p=self.body()
