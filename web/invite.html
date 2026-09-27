@@ -1,0 +1,16 @@
+<!doctype html>
+<html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>SupportPilot — приглашение</title>
+<style>
+body{font-family:system-ui,-apple-system,sans-serif;background:#f5f7fb;margin:0;color:#172033}.box{max-width:460px;margin:8vh auto;padding:24px;background:#fff;border:1px solid #e2e8f0;border-radius:16px}h1{margin-top:0}label{display:block;margin:12px 0 6px}input{width:100%;box-sizing:border-box;padding:11px;border:1px solid #cbd5e1;border-radius:9px;font:inherit}.btn{margin-top:16px;width:100%;padding:11px;border:0;border-radius:9px;background:#2563eb;color:#fff;font-weight:700}.notice{padding:11px;border-radius:9px;background:#eef6ff;margin:12px 0}.err{background:#fee2e2;color:#991b1b}.small{color:#64748b;font-size:13px}
+</style></head><body><div class="box">
+<h1>Приглашение в SupportPilot</h1><p id="intro" class="small">Создайте пароль для доступа к рабочему кабинету компании.</p>
+<div id="msg" class="notice">Проверка приглашения…</div>
+<form id="f" style="display:none"><label>Email</label><input id="email" readonly><label>Новый пароль</label><input id="pw" type="password" minlength="12" required><label>Повторите пароль</label><input id="pw2" type="password" minlength="12" required><button class="btn">Активировать кабинет</button></form>
+</div><script>
+const q=new URLSearchParams(location.search),token=q.get('token')||'',msg=document.getElementById('msg'),form=document.getElementById('f'),email=document.getElementById('email');
+async function load(){if(!token){msg.textContent='Ссылка приглашения отсутствует.';msg.className='notice err';return}
+try{const r=await fetch('/api/commercial/invitations?token='+encodeURIComponent(token),{credentials:'same-origin'});const d=await r.json();if(!r.ok)throw Error(d.error||'Приглашение недействительно');email.value=d.email;msg.textContent='Приглашение для '+d.email+'. Роль: '+d.role+'. Ссылка действует ограниченное время.';form.style.display='block'}catch(e){msg.textContent=e.message;msg.className='notice err'}}
+form.onsubmit=async e=>{e.preventDefault();if(pw.value!==pw2.value){msg.textContent='Пароли не совпадают.';msg.className='notice err';return}try{const r=await fetch('/api/commercial/invitations/accept',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({token,password:pw.value})});const d=await r.json();if(!r.ok)throw Error(d.error||'Не удалось активировать кабинет');location.href='/client'}catch(e){msg.textContent=e.message;msg.className='notice err'}};
+load();
+</script></body></html>
