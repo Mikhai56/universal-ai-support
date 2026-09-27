@@ -636,21 +636,25 @@ def crypto_wallet_balances():
         w["balance"]=format(balance,"f")
     return wallets
 
-def stats():
+def stats(company_id=None):
     conn=db(); pg=is_pg(conn); p="%s" if pg else "?"
     def scalar(sql, params=()):
         return int(conn.execute(sql,tuple(params)).fetchone()["n"])
-    total=scalar("SELECT COUNT(*) AS n FROM tickets")
-    answered=scalar("SELECT COUNT(*) AS n FROM tickets WHERE status="+p,("answered",))
-    escalated=scalar("SELECT COUNT(*) AS n FROM tickets WHERE status="+p,("escalated",))
-    open_count=scalar("SELECT COUNT(*) AS n FROM tickets WHERE status IN ('escalated','needs_clarification','open')")
-    resolved=scalar("SELECT COUNT(*) AS n FROM tickets WHERE status="+p,("resolved",))
-    conversations=scalar("SELECT COUNT(*) AS n FROM conversations")
-    messages=scalar("SELECT COUNT(*) AS n FROM messages")
-    operators=scalar("SELECT COUNT(*) AS n FROM operators")
-    unassigned=scalar("SELECT COUNT(*) AS n FROM tickets WHERE status IN ('escalated','needs_clarification','open') AND (assignee IS NULL OR assignee='')")
+    scope_t = (" AND company_id="+p) if company_id is not None else ""
+    scope_c = (" WHERE company_id="+p) if company_id is not None else ""
+    scope_m = (" WHERE conversation_id IN (SELECT id FROM conversations WHERE company_id="+p+")") if company_id is not None else ""
+    vals_t = (str(company_id),) if company_id is not None else ()
+    total=scalar("SELECT COUNT(*) AS n FROM tickets"+(" WHERE company_id="+p if company_id is not None else ""),vals_t)
+    answered=scalar("SELECT COUNT(*) AS n FROM tickets WHERE status="+p+(" AND company_id="+p if company_id is not None else ""),("answered",)+vals_t)
+    escalated=scalar("SELECT COUNT(*) AS n FROM tickets WHERE status="+p+(" AND company_id="+p if company_id is not None else ""),("escalated",)+vals_t)
+    open_count=scalar("SELECT COUNT(*) AS n FROM tickets WHERE status IN ('escalated','needs_clarification','open')"+(" AND company_id="+p if company_id is not None else ""),vals_t)
+    resolved=scalar("SELECT COUNT(*) AS n FROM tickets WHERE status="+p+(" AND company_id="+p if company_id is not None else ""),("resolved",)+vals_t)
+    conversations=scalar("SELECT COUNT(*) AS n FROM conversations"+(" WHERE company_id="+p if company_id is not None else ""),vals_t)
+    messages=scalar("SELECT COUNT(*) AS n FROM messages"+(" WHERE conversation_id IN (SELECT id FROM conversations WHERE company_id="+p+")" if company_id is not None else ""),vals_t)
+    operators=scalar("SELECT COUNT(*) AS n FROM company_members WHERE company_id="+p+" AND status='active'",(str(company_id),)) if company_id is not None else scalar("SELECT COUNT(*) AS n FROM operators")
+    unassigned=scalar("SELECT COUNT(*) AS n FROM tickets WHERE status IN ('escalated','needs_clarification','open') AND (assignee IS NULL OR assignee='')"+(" AND company_id="+p if company_id is not None else ""),vals_t)
     unread=scalar("SELECT COUNT(*) AS n FROM notifications WHERE read_at IS NULL")
-    try: leads=scalar("SELECT COUNT(*) AS n FROM leads")
+    try: leads=scalar("SELECT COUNT(*) AS n FROM leads"+(" WHERE company_id="+p if company_id is not None else ""),vals_t)
     except Exception: leads=0
     conn.close()
     return {"total":total,"answered":answered,"escalated":escalated,"open":open_count,
@@ -1067,6 +1071,9 @@ class Handler(BaseHTTPRequestHandler):
             search=parse_qs(urlparse(self.path).query).get("q",[""])[0]
             return self.send_json({"customers":list_customers(search=search,company_id=company["id"] if company else None)})
         if path=="/api/stats":
+            company=company_from_request(self)
+            if company:
+                return self.send_json(stats(company_id=company["id"]))
             if not self.require(): return
             return self.send_json(stats())
         if path=="/api/finance/accounts":
