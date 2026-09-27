@@ -253,6 +253,11 @@ def create_ticket(question,answer,status,reason="",customer_name="",customer_ema
         cur=conn.execute("""INSERT INTO tickets(chat_id,username,question,answer,status,priority,reason,customer_name,customer_email,created_at,updated_at)
           VALUES(?,?,?,?,?,?,?,?,?,?,?)""",("web","web-user",q,a,status,"high" if status=="escalated" else "normal",reason,customer_name,customer_email,now,now))
         tid=cur.lastrowid
+    # Record the creation event so every ticket has a complete audit trail from the first moment.
+    if is_pg(conn):
+        conn.execute("INSERT INTO ticket_events(ticket_id,actor,action,details) VALUES(%s,%s,%s,%s)",(tid,"system","ticket.created",json.dumps({"status":status,"reason":reason or ""},ensure_ascii=False)))
+    else:
+        conn.execute("INSERT INTO ticket_events(ticket_id,actor,action,details,created_at) VALUES(?,?,?,?,datetime('now'))",(tid,"system","ticket.created",json.dumps({"status":status,"reason":reason or ""},ensure_ascii=False)))
     if status in ("escalated","needs_clarification"):
         create_notification("ticket","Новое обращение требует внимания",f"Обращение #{tid}: {reason or status}",tid,conn=conn)
     conn.commit(); conn.close(); return tid
