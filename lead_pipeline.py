@@ -95,9 +95,15 @@ def list_leads(status=None, search=None, limit=100, company_id=None):
 def get_lead(lead_id, company_id=None):
     conn=db()
     if is_pg(conn):
-        r=conn.execute("SELECT * FROM leads WHERE id=%s",(lead_id,)).fetchone()
+        if company_id is None:
+            r=conn.execute("SELECT * FROM leads WHERE id=%s",(lead_id,)).fetchone()
+        else:
+            r=conn.execute("SELECT * FROM leads WHERE id=%s AND company_id=%s",(lead_id,str(company_id))).fetchone()
     else:
-        r=conn.execute("SELECT * FROM leads WHERE id=?",(lead_id,)).fetchone()
+        if company_id is None:
+            r=conn.execute("SELECT * FROM leads WHERE id=?",(lead_id,)).fetchone()
+        else:
+            r=conn.execute("SELECT * FROM leads WHERE id=? AND company_id=?",(lead_id,str(company_id))).fetchone()
     conn.close()
     return dict(r) if r else None
 
