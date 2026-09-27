@@ -245,7 +245,7 @@ class SupportPilotTests(unittest.TestCase):
         self.assertEqual(app.list_money_accounts()[0]["balance"], "100.000000")
         self.assertTrue(app.add_crypto_wallet("Мой USDT", "ethereum", "0x1111111111111111111111111111111111111111", "finance@example.com"))
         wallet = app.crypto_wallet_balances()[0]
-        self.assertEqual(wallet["balance"], "0")
+        self.assertEqual(wallet["balance"], "0.000000")
         self.assertTrue(app.record_crypto_transaction(wallet["id"], "in", "50", "0xabc123", "Пополнение", "finance@example.com"))
         self.assertEqual(app.crypto_wallet_balances()[0]["balance"], "50.000000")
         with self.assertRaises(ValueError):
