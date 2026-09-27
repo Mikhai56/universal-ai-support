@@ -173,8 +173,6 @@ def init_db():
           actor TEXT NOT NULL, action TEXT NOT NULL, details TEXT, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())""")
         conn.execute("ALTER TABLE tickets ADD COLUMN IF NOT EXISTS company_id TEXT")
         conn.execute("ALTER TABLE ticket_events ADD COLUMN IF NOT EXISTS company_id TEXT")
-        conn.execute("ALTER TABLE conversations ADD COLUMN IF NOT EXISTS company_id TEXT")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_conversations_company_id ON conversations(company_id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_tickets_company_id ON tickets(company_id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_ticket_events_company_id ON ticket_events(company_id)")
     else:
@@ -185,9 +183,6 @@ def init_db():
         if "company_id" not in tc: conn.execute("ALTER TABLE tickets ADD COLUMN company_id TEXT")
         ec={r["name"] for r in conn.execute("PRAGMA table_info(ticket_events)").fetchall()}
         if "company_id" not in ec: conn.execute("ALTER TABLE ticket_events ADD COLUMN company_id TEXT")
-        cc={r["name"] for r in conn.execute("PRAGMA table_info(conversations)").fetchall()}
-        if "company_id" not in cc: conn.execute("ALTER TABLE conversations ADD COLUMN company_id TEXT")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_conversations_company_id ON conversations(company_id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_tickets_company_id ON tickets(company_id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_ticket_events_company_id ON ticket_events(company_id)")
     if is_pg(conn):
