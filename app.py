@@ -357,7 +357,9 @@ def answer_question(question, name="", email="", conversation_id="", company_id=
     if answer:
         save_message(conversation_id,"assistant",answer,"answered")
         return {"answer":answer,"status":"answered","conversation_id":conversation_id,"source":source}
-    clarification="Я не нашёл точного ответа в базе знаний. Уточните вопрос или передайте обращение менеджеру."\n    save_message(conversation_id,"assistant",clarification,"needs_clarification")\n    return {"answer":clarification,"status":"needs_clarification","conversation_id":conversation_id}
+    clarification="Я не нашёл точного ответа в базе знаний. Уточните вопрос или передайте обращение менеджеру."
+    save_message(conversation_id,"assistant",clarification,"needs_clarification")
+    return {"answer":clarification,"status":"needs_clarification","conversation_id":conversation_id}
 
 def list_tickets(status=None, priority=None, search=None, assignee=None, unassigned=False, limit=100, company_id=None):
     if status is not None and status not in TICKET_STATUSES: raise ValueError("invalid ticket status")
