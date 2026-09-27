@@ -1102,7 +1102,7 @@ def commercial_get(handler,path):
     if path=="/api/commercial/me":
         c=company_from_request(handler)
         if not c: return handler.send_json({"authenticated":False},200) or True
-        return handler.send_json({"authenticated":True,"company":{"id":c["id"],"name":c["name"],"slug":c["slug"],"email":c["owner_email"],"plan":c["plan"],"subscription_status":c["subscription_status"],"trial_ends_at":c["trial_ends_at"],"status":c["status"]}})
+        return handler.send_json({"authenticated":True,"company":{"id":c["id"],"name":c["name"],"slug":c["slug"],"email":c.get("member_email") or c["owner_email"],"owner_email":c["owner_email"],"member_id":c.get("member_id"),"member_role":c.get("member_role","owner"),"plan":c["plan"],"subscription_status":c["subscription_status"],"trial_ends_at":c["trial_ends_at"],"status":c["status"]}})
     if path=="/api/commercial/usage":
         c=company_from_request(handler)
         if not c: return handler.send_json({"error":"authentication required"},401) or True
@@ -1127,7 +1127,7 @@ def commercial_get(handler,path):
 
     if path=="/api/commercial/members":
         c=company_from_request(handler)
-        if not require_company_permission(handler,c,"manage"): return
+        if not require_company_permission(handler,c,"read"): return
         return handler.send_json({"members":list_company_members(c["id"])})
     return False
 
