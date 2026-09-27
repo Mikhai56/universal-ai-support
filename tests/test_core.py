@@ -40,7 +40,8 @@ class SupportPilotTests(unittest.TestCase):
 
     def test_permissions(self):
         cid=self.app.commercial_register("Role Company","role@test.example","StrongPass123")
-        self.assertTrue(self.app.company_permission(cid,"role@test.example","manage"))\n        conn=self.app.db(); conn.execute("UPDATE companies SET plan=?",("starter",)); conn.commit(); conn.close()
+        self.assertTrue(self.app.company_permission(cid,"role@test.example","manage"))
+        conn=self.app.db(); conn.execute("UPDATE companies SET plan=?",("starter",)); conn.commit(); conn.close()
         self.app.create_company_invitation({"id":cid,"owner_email":"role@test.example","member_email":"role@test.example"},"viewer@test.example","viewer")
         token= self.app.list_company_invitations(cid)[0]
         self.assertEqual(token["role"],"viewer")
