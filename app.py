@@ -1127,7 +1127,7 @@ def commercial_get(handler,path):
 
     if path=="/api/commercial/members":
         c=company_from_request(handler)
-        if not require_company_permission(handler,c,"manage"): return or True
+        if not require_company_permission(handler,c,"manage"): return
         return handler.send_json({"members":list_company_members(c["id"])})
     return False
 
