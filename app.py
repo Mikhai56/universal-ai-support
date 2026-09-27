@@ -354,9 +354,7 @@ def answer_question(question, name="", email="", conversation_id="", company_id=
     if ai:
         save_message(conversation_id,"assistant",ai,"answered")
         return {"answer":ai,"status":"answered","conversation_id":conversation_id,"source":source or "AI"}
-    if answer:
-        save_message(conversation_id,"assistant",answer,"answered")
-def list_tickets(status=None, priority=None, search=None, assignee=None, unassigned=False, limit=100, company_id=None):
+    if answer:\n        save_message(conversation_id,"assistant",answer,"answered")\n        return {"answer":answer,"status":"answered","conversation_id":conversation_id,"source":source}\n    return {"answer":"Не удалось сформировать ответ. Попробуйте уточнить вопрос.","status":"needs_clarification","conversation_id":conversation_id}\n\ndef list_tickets(status=None, priority=None, search=None, assignee=None, unassigned=False, limit=100, company_id=None):
     if status is not None and status not in TICKET_STATUSES: raise ValueError("invalid ticket status")
     if priority is not None and priority not in TICKET_PRIORITIES: raise ValueError("invalid ticket priority")
     search=str(search or "").strip()[:120]; limit=min(max(int(limit),1),100)
