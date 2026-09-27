@@ -402,17 +402,10 @@ def update_ticket(tid, fields, actor="system", company_id=None):
 
 def list_ticket_events(tid, limit=100, company_id=None):
     limit=min(max(int(limit),1),100); conn=db(); p="%s" if is_pg(conn) else "?"
-    if company_id is None: rs=conn.execute(f"SELECT * FROM ticket_events WHERE ticket_id={p} ORDER BY id DESC LIMIT {p}",(tid,limit)).fetchall()
-    else: rs=conn.execute(f"SELECT * FROM ticket_events WHERE ticket_id={p} AND company_id={p} ORDER BY id DESC LIMIT {p}",(tid,str(company_id),limit)).fetchall()
-    conn.close(); return [row(x) for x in rs]
-            create_notification("ticket","Обновлено обращение",f"Обращение #{tid}: статус {after.get('status')}",tid,conn=conn)
-    conn.commit(); conn.close()
-    return True
-
-def list_ticket_events(tid, limit=100):
-    limit=min(max(int(limit),1),100)
-    conn=db(); pg=is_pg(conn); p="%s" if pg else "?"
-    rs=conn.execute(f"SELECT * FROM ticket_events WHERE ticket_id={p} ORDER BY id DESC LIMIT {p}",(tid,limit)).fetchall()
+    if company_id is None:
+        rs=conn.execute(f"SELECT * FROM ticket_events WHERE ticket_id={p} ORDER BY id DESC LIMIT {p}",(tid,limit)).fetchall()
+    else:
+        rs=conn.execute(f"SELECT * FROM ticket_events WHERE ticket_id={p} AND company_id={p} ORDER BY id DESC LIMIT {p}",(tid,str(company_id),limit)).fetchall()
     conn.close(); return [row(x) for x in rs]
 
 def list_customers(search=None, limit=200):
