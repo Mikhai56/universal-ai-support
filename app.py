@@ -154,7 +154,7 @@ def init_db():
         conn.execute("""CREATE TABLE IF NOT EXISTS tickets(
           id BIGSERIAL PRIMARY KEY, chat_id TEXT NOT NULL, username TEXT, question TEXT NOT NULL,
           answer TEXT NOT NULL, status TEXT NOT NULL, priority TEXT NOT NULL DEFAULT 'normal',
-          reason TEXT, assignee TEXT, customer_email TEXT, customer_name TEXT,
+          reason TEXT, assignee TEXT, customer_email TEXT, customer_name TEXT, company_id TEXT,
           created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
           resolved_at TIMESTAMPTZ)""")
     else:
@@ -163,15 +163,25 @@ def init_db():
           question TEXT NOT NULL, answer TEXT NOT NULL, status TEXT NOT NULL,
           priority TEXT NOT NULL DEFAULT 'normal', reason TEXT, assignee TEXT,
           customer_email TEXT, customer_name TEXT, created_at TEXT NOT NULL,
-          updated_at TEXT NOT NULL, resolved_at TEXT)""")
+          updated_at TEXT NOT NULL, resolved_at TEXT, company_id TEXT)""")
     if is_pg(conn):
         conn.execute("""CREATE TABLE IF NOT EXISTS ticket_events(
-          id BIGSERIAL PRIMARY KEY, ticket_id BIGINT NOT NULL, actor TEXT NOT NULL,
-          action TEXT NOT NULL, details TEXT, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())""")
+          id BIGSERIAL PRIMARY KEY, ticket_id BIGINT NOT NULL, company_id TEXT,
+          actor TEXT NOT NULL, action TEXT NOT NULL, details TEXT, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())""")
+        conn.execute("ALTER TABLE tickets ADD COLUMN IF NOT EXISTS company_id TEXT")
+        conn.execute("ALTER TABLE ticket_events ADD COLUMN IF NOT EXISTS company_id TEXT")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_tickets_company_id ON tickets(company_id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_ticket_events_company_id ON ticket_events(company_id)")
     else:
         conn.execute("""CREATE TABLE IF NOT EXISTS ticket_events(
-          id INTEGER PRIMARY KEY AUTOINCREMENT, ticket_id INTEGER NOT NULL, actor TEXT NOT NULL,
-          action TEXT NOT NULL, details TEXT, created_at TEXT NOT NULL)""")
+          id INTEGER PRIMARY KEY AUTOINCREMENT, ticket_id INTEGER NOT NULL, company_id TEXT,
+          actor TEXT NOT NULL, action TEXT NOT NULL, details TEXT, created_at TEXT NOT NULL)""")
+        tc={r["name"] for r in conn.execute("PRAGMA table_info(tickets)").fetchall()}
+        if "company_id" not in tc: conn.execute("ALTER TABLE tickets ADD COLUMN company_id TEXT")
+        ec={r["name"] for r in conn.execute("PRAGMA table_info(ticket_events)").fetchall()}
+        if "company_id" not in ec: conn.execute("ALTER TABLE ticket_events ADD COLUMN company_id TEXT")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_tickets_company_id ON tickets(company_id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_ticket_events_company_id ON ticket_events(company_id)")
     if is_pg(conn):
         conn.execute("""CREATE TABLE IF NOT EXISTS operators(
           email TEXT PRIMARY KEY, password_hash TEXT NOT NULL, role TEXT NOT NULL,
@@ -232,26 +242,25 @@ def risky(question):
       "платёжный инцидент":["списали дважды","двойное списание","вернуть деньги","данные карты","номер карты","cvv","cvc"],
       "персональные данные":["покажи данные другого","чужие данные","удали мои данные","паспорт"],
       "юридический вопрос":["подам в суд","юрист","претензия","нарушение закона"],
-      "безопасность":["взломали","утечка","украли пароль","мошенничество"]
-    }
-    for reason,phrases in groups.items():
-        if any(p in q for p in phrases): return reason
-    return None
-
-def redact_sensitive(text):
-    text=re.sub(r"\b(?:\d[ -]*?){13,19}\b","[ДАННЫЕ КАРТЫ УДАЛЕНЫ]",text)
-    return re.sub(r"(?i)\b(cvv|cvc)\s*[:=]?\s*\d{3,4}\b",r"\1 [УДАЛЕНО]",text)
-
-def create_ticket(question,answer,status,reason="",customer_name="",customer_email=""):
+def create_ticket(question,answer,status,reason="",customer_name="",customer_email="",company_id=None):
     conn=db(); q=redact_sensitive(question); a=redact_sensitive(answer)
     if is_pg(conn):
-        cur=conn.execute("""INSERT INTO tickets(chat_id,username,question,answer,status,priority,reason,customer_name,customer_email)
-          VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id""",
-          ("web","web-user",q,a,status,"high" if status=="escalated" else "normal",reason,customer_name,customer_email))
+        cur=conn.execute("""INSERT INTO tickets(chat_id,username,question,answer,status,priority,reason,customer_name,customer_email,company_id)
+          VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id""",
+          ("web","web-user",q,a,status,"high" if status=="escalated" else "normal",reason,customer_name,customer_email,company_id))
         tid=cur.fetchone()["id"]
     else:
         now=time.strftime("%Y-%m-%d %H:%M:%S")
-        cur=conn.execute("""INSERT INTO tickets(chat_id,username,question,answer,status,priority,reason,customer_name,customer_email,created_at,updated_at)
+        cur=conn.execute("""INSERT INTO tickets(chat_id,username,question,answer,status,priority,reason,customer_name,customer_email,created_at,updated_at,company_id)
+          VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",("web","web-user",q,a,status,"high" if status=="escalated" else "normal",reason,customer_name,customer_email,now,now,company_id))
+        tid=cur.lastrowid
+    if is_pg(conn):
+        conn.execute("INSERT INTO ticket_events(ticket_id,company_id,actor,action,details) VALUES(%s,%s,%s,%s,%s)",(tid,company_id,"system","ticket.created",json.dumps({"status":status,"reason":reason or ""},ensure_ascii=False)))
+    else:
+        conn.execute("INSERT INTO ticket_events(ticket_id,company_id,actor,action,details,created_at) VALUES(?,?,?,?,?,datetime('now'))",(tid,company_id,"system","ticket.created",json.dumps({"status":status,"reason":reason or ""},ensure_ascii=False)))
+    if status in ("escalated","needs_clarification"):
+        create_notification("ticket","Новое обращение требует внимания",f"Обращение #{tid}: {reason or status}",tid,conn=conn)
+    conn.commit(); conn.close(); return tid
           VALUES(?,?,?,?,?,?,?,?,?,?,?)""",("web","web-user",q,a,status,"high" if status=="escalated" else "normal",reason,customer_name,customer_email,now,now))
         tid=cur.lastrowid
     # Record the creation event so every ticket has a complete audit trail from the first moment.
@@ -322,56 +331,37 @@ def answer_question(question, name="", email="", conversation_id=""):
         return {"answer":ai,"status":"answered","conversation_id":conversation_id,"source":source or "AI"}
     if answer:
         save_message(conversation_id,"assistant",answer,"answered")
-        return {"answer":answer,"status":"answered","conversation_id":conversation_id,"source":source}
-    fallback="Я пока не нашёл точного ответа. Уточните вопрос или передам его менеджеру."
-    ticket_id=create_ticket(question,fallback,"needs_clarification","недостаточно данных",name,email)
-    save_message(conversation_id,"assistant",fallback,"needs_clarification",ticket_id)
-    return {"answer":fallback,"status":"needs_clarification","ticket_id":ticket_id,"conversation_id":conversation_id}
-
-def row(r):
-    return dict(r)
-
-def list_tickets(status=None, priority=None, search=None, assignee=None, unassigned=False, limit=100):
-    if status is not None and status not in TICKET_STATUSES:
-        raise ValueError("invalid ticket status")
-    if priority is not None and priority not in TICKET_PRIORITIES:
-        raise ValueError("invalid ticket priority")
-    search=str(search or "").strip()[:120]
-    limit=min(max(int(limit),1),100)
-    conn=db(); clauses=[]; vals=[]
-    if status:
-        clauses.append("status="+("%s" if is_pg(conn) else "?")); vals.append(status)
-    if priority:
-        clauses.append("priority="+("%s" if is_pg(conn) else "?")); vals.append(priority)
-    if unassigned:
-        clauses.append("(assignee IS NULL OR assignee='')")
-    elif assignee:
-        clauses.append("assignee="+("%s" if is_pg(conn) else "?")); vals.append(str(assignee).strip().lower()[:254])
+def list_tickets(status=None, priority=None, search=None, assignee=None, unassigned=False, limit=100, company_id=None):
+    if status is not None and status not in TICKET_STATUSES: raise ValueError("invalid ticket status")
+    if priority is not None and priority not in TICKET_PRIORITIES: raise ValueError("invalid ticket priority")
+    search=str(search or "").strip()[:120]; limit=min(max(int(limit),1),100)
+    conn=db(); clauses=[]; vals=[]; p="%s" if is_pg(conn) else "?"
+    if company_id is not None: clauses.append("company_id="+p); vals.append(str(company_id))
+    if status: clauses.append("status="+p); vals.append(status)
+    if priority: clauses.append("priority="+p); vals.append(priority)
+    if unassigned: clauses.append("(assignee IS NULL OR assignee='')")
+    elif assignee: clauses.append("assignee="+p); vals.append(str(assignee).strip().lower()[:254])
     if search:
         term="%"+search+"%"
-        op="%s" if is_pg(conn) else "?"
-        clauses.append("(" + " OR ".join(f"{field} LIKE {op}" for field in ("question","customer_name","customer_email","assignee")) + ")")
+        clauses.append("("+" OR ".join(f"{field} LIKE {p}" for field in ("question","customer_name","customer_email","assignee"))+")")
         vals.extend([term]*4)
     where=(" WHERE "+" AND ".join(clauses)) if clauses else ""
     order="ORDER BY CASE priority WHEN 'urgent' THEN 0 WHEN 'high' THEN 1 WHEN 'normal' THEN 2 ELSE 3 END, id DESC"
-    placeholder="%s" if is_pg(conn) else "?"
     vals.append(limit)
-    rs=conn.execute(f"SELECT * FROM tickets{where} {order} LIMIT {placeholder}",tuple(vals)).fetchall()
+    rs=conn.execute(f"SELECT * FROM tickets{where} {order} LIMIT {p}",tuple(vals)).fetchall()
     conn.close(); return [row(x) for x in rs]
 
 TICKET_STATUSES={"answered","escalated","needs_clarification","open","resolved"}
 TICKET_PRIORITIES={"low","normal","high","urgent"}
 
-def get_ticket(tid):
-    conn=db()
-    if is_pg(conn):
-        r=conn.execute("SELECT * FROM tickets WHERE id=%s",(tid,)).fetchone()
-    else:
-        r=conn.execute("SELECT * FROM tickets WHERE id=?",(tid,)).fetchone()
-    conn.close()
-    return row(r) if r else None
+def get_ticket(tid, company_id=None):
+    conn=db(); p="%s" if is_pg(conn) else "?"
+    q="SELECT * FROM tickets WHERE id="+p; vals=[tid]
+    if company_id is not None: q+=" AND company_id="+p; vals.append(str(company_id))
+    r=conn.execute(q,tuple(vals)).fetchone()
+    conn.close(); return row(r) if r else None
 
-def update_ticket(tid, fields, actor="system"):
+def update_ticket(tid, fields, actor="system", company_id=None):
     allowed={"status","priority","assignee","customer_name","customer_email"}
     fields={k:v for k,v in fields.items() if k in allowed}
     if not fields: return None
@@ -386,39 +376,34 @@ def update_ticket(tid, fields, actor="system"):
         fields["assignee"]=str(fields["assignee"]).strip().lower()[:254]
         if fields["assignee"]:
             check=db()
-            try:
-                exists=check.execute("SELECT email FROM operators WHERE email="+("%s" if is_pg(check) else "?"),(fields["assignee"],)).fetchone()
-            finally:
-                check.close()
+            try: exists=check.execute("SELECT email FROM operators WHERE email="+("%s" if is_pg(check) else "?"),(fields["assignee"],)).fetchone()
+            finally: check.close()
             if not exists: raise ValueError("assignee must be an existing operator email")
-    conn=db(); pg=is_pg(conn)
-    ticket=conn.execute("SELECT status,priority,assignee FROM tickets WHERE id="+("%s" if pg else "?"),(tid,)).fetchone()
-    if not ticket:
-        conn.close()
-        return False
-    before=dict(ticket)
-    sets=[]; vals=[]
-    for k,v in fields.items(): sets.append(f"{k}={'%s' if pg else '?'}"); vals.append(v)
+    conn=db(); pg=is_pg(conn); p="%s" if pg else "?"
+    scope=(" AND company_id="+p) if company_id is not None else ""; scope_vals=[str(company_id)] if company_id is not None else []
+    ticket=conn.execute("SELECT status,priority,assignee FROM tickets WHERE id="+p+scope,(tid,*scope_vals)).fetchone()
+    if not ticket: conn.close(); return False
+    before=dict(ticket); sets=[]; vals=[]
+    for k,v in fields.items(): sets.append(f"{k}={p}"); vals.append(v)
     sets.append("updated_at=NOW()" if pg else "updated_at=datetime('now')")
-    if fields.get("status")=="resolved":
-        sets.append("resolved_at=NOW()" if pg else "resolved_at=datetime('now')")
-    elif "status" in fields:
-        sets.append("resolved_at=NULL")
-    vals.append(tid)
-    q=f"UPDATE tickets SET {', '.join(sets)} WHERE id={'%s' if pg else '?'}"
-    conn.execute(q,vals)
-    after={k:fields.get(k,before[k]) for k in before}
-    changes={k:{"from":before[k],"to":after[k]} for k in before if before[k]!=after[k]}
+    if fields.get("status")=="resolved": sets.append("resolved_at=NOW()" if pg else "resolved_at=datetime('now')")
+    elif "status" in fields: sets.append("resolved_at=NULL")
+    vals.append(tid); vals.extend(scope_vals)
+    conn.execute(f"UPDATE tickets SET {', '.join(sets)} WHERE id={p}{scope}",vals)
+    after={k:fields.get(k,before[k]) for k in before}; changes={k:{"from":before[k],"to":after[k]} for k in before if before[k]!=after[k]}
     if changes:
         details=json.dumps(changes,ensure_ascii=False)
-        if pg:
-            conn.execute("INSERT INTO ticket_events(ticket_id,actor,action,details) VALUES(%s,%s,%s,%s)",(tid,str(actor)[:160],"ticket.updated",details))
-        else:
-            conn.execute("INSERT INTO ticket_events(ticket_id,actor,action,details,created_at) VALUES(?,?,?,?,datetime('now'))",(tid,str(actor)[:160],"ticket.updated",details))
-    if changes:
-        if after.get("assignee"):
-            create_notification("assignment","Вам назначено обращение",f"Обращение #{tid}",tid,str(after["assignee"]).strip().lower(),conn=conn)
-        if after.get("status") in ("escalated","open"):
+        if pg: conn.execute("INSERT INTO ticket_events(ticket_id,company_id,actor,action,details) VALUES(%s,%s,%s,%s,%s)",(tid,company_id,str(actor)[:160],"ticket.updated",details))
+        else: conn.execute("INSERT INTO ticket_events(ticket_id,company_id,actor,action,details,created_at) VALUES(?,?,?,?,?,datetime('now'))",(tid,company_id,str(actor)[:160],"ticket.updated",details))
+        if after.get("assignee"): create_notification("assignment","Вам назначено обращение",f"Обращение #{tid}",tid,str(after["assignee"]).strip().lower(),conn=conn)
+        if after.get("status") in ("escalated","open"): create_notification("ticket","Обновлено обращение",f"Обращение #{tid}: статус {after.get('status')}",tid,conn=conn)
+    conn.commit(); conn.close(); return True
+
+def list_ticket_events(tid, limit=100, company_id=None):
+    limit=min(max(int(limit),1),100); conn=db(); p="%s" if is_pg(conn) else "?"
+    if company_id is None: rs=conn.execute(f"SELECT * FROM ticket_events WHERE ticket_id={p} ORDER BY id DESC LIMIT {p}",(tid,limit)).fetchall()
+    else: rs=conn.execute(f"SELECT * FROM ticket_events WHERE ticket_id={p} AND company_id={p} ORDER BY id DESC LIMIT {p}",(tid,str(company_id),limit)).fetchall()
+    conn.close(); return [row(x) for x in rs]
             create_notification("ticket","Обновлено обращение",f"Обращение #{tid}: статус {after.get('status')}",tid,conn=conn)
     conn.commit(); conn.close()
     return True
@@ -1018,22 +1003,29 @@ class Handler(BaseHTTPRequestHandler):
             lead=get_lead(lead_id)
             return self.send_json({"lead":lead,"events":list_lead_events(lead_id)} if lead else {"error":"lead not found"},200 if lead else 404)
         if path=="/api/tickets":
+            company=company_from_request(self)
+            if company:
+                params=parse_qs(urlparse(self.path).query)
+                try: tickets=list_tickets(status=params.get("status",[None])[0],priority=params.get("priority",[None])[0],search=params.get("q",[""])[0],company_id=company["id"])
+                except ValueError as e: return self.send_json({"error":str(e)},400)
+                return self.send_json({"tickets":tickets})
             if not self.require(): return
             params=parse_qs(urlparse(self.path).query)
-            status=params.get("status",[None])[0]
-            priority=params.get("priority",[None])[0]
-            search=params.get("q",[""])[0]
-            assignee=params.get("assignee",[""])[0]
+            status=params.get("status",[None])[0]; priority=params.get("priority",[None])[0]
+            search=params.get("q",[""])[0]; assignee=params.get("assignee",[""])[0]
             unassigned=params.get("unassigned",["0"])[0] in ("1","true","yes")
-            if assignee=="__unassigned__":
-                assignee=""
-                unassigned=True
-            try:
-                tickets=list_tickets(status=status,priority=priority,search=search,assignee=assignee,unassigned=unassigned)
-            except ValueError as e:
-                return self.send_json({"error":str(e)},400)
+            if assignee=="__unassigned__": assignee=""; unassigned=True
+            try: tickets=list_tickets(status=status,priority=priority,search=search,assignee=assignee,unassigned=unassigned)
+            except ValueError as e: return self.send_json({"error":str(e)},400)
             return self.send_json({"tickets":tickets})
         if path.startswith("/api/tickets/"):
+            company=company_from_request(self)
+            if not company and not self.require(): return
+            try: tid=int(path.rsplit("/",1)[1])
+            except ValueError: return self.send_json({"error":"invalid ticket id"},400)
+            ticket=get_ticket(tid,company_id=company["id"] if company else None)
+            if not ticket: return self.send_json({"error":"ticket not found"},404)
+            return self.send_json({"ticket":ticket,"events":list_ticket_events(tid,company_id=company["id"] if company else None)})
             if not self.require(): return
             try: tid=int(path.rsplit("/",1)[1])
             except ValueError: return self.send_json({"error":"invalid ticket id"},400)
@@ -1181,6 +1173,14 @@ class Handler(BaseHTTPRequestHandler):
             try: record_crypto_transaction(p.get("wallet_id"),p.get("direction"),p.get("amount"),p.get("tx_hash"),p.get("note"),s["email"])
             except (ValueError,TypeError) as e: return self.send_json({"error":str(e)},400)
             return self.send_json({"ok":True},201)
+        if path=="/api/tickets":
+            company=company_from_request(self)
+            if not company: return self.send_json({"error":"commercial authentication required"},401)
+            question=redact_sensitive(str(p.get("question","")).strip())[:MAX_MESSAGE_CHARS]
+            answer=redact_sensitive(str(p.get("answer","")).strip())[:MAX_MESSAGE_CHARS]
+            if not question or not answer: return self.send_json({"error":"question and answer are required"},400)
+            tid=create_ticket(question,answer,str(p.get("status","open")),str(p.get("reason","")),str(p.get("customer_name","")),str(p.get("customer_email","")),company_id=company["id"])
+            return self.send_json({"ok":True,"ticket_id":tid},201)
         if path=="/api/logout":
             token=session_token(self.headers); SESSIONS.pop(token,None)
             self._clear_session_cookie=True
@@ -1245,16 +1245,18 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json({"error":"lead not found"},404)
             return self.send_json({"ok":True})
         if path.startswith("/api/tickets/"):
+            company=company_from_request(self)
+            if company:
+                try: tid=int(path.rsplit("/",1)[1]); ok=update_ticket(tid,self.body(),actor=company["owner_email"],company_id=company["id"])
+                except ValueError as e: return self.send_json({"error":str(e)},400)
+                except Exception: return self.send_json({"error":"ticket update failed"},500)
+                return self.send_json({"ok":bool(ok)})
             s=self.require("write")
             if not s: return
-            try:
-                tid=int(path.rsplit("/",1)[1])
-                ok=update_ticket(tid,self.body(),actor=s["email"])
+            try: tid=int(path.rsplit("/",1)[1]); ok=update_ticket(tid,self.body(),actor=s["email"])
             except ValueError as e: return self.send_json({"error":str(e)},400)
-            except Exception as e: return self.send_json({"error":"ticket update failed"},500)
+            except Exception: return self.send_json({"error":"ticket update failed"},500)
             return self.send_json({"ok":bool(ok)})
-        self.send_json({"error":"not found"},404)
-    def log_message(self,fmt,*args): print("WEB",fmt%args,flush=True)
 
 if __name__=="__main__":
     init_db(); ThreadingHTTPServer((HOST,PORT),Handler).serve_forever()
