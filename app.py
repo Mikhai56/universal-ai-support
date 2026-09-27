@@ -739,6 +739,13 @@ def init_commercial_db(conn=None):
           provider_customer_id TEXT, provider_subscription_id TEXT,
           current_period_end TIMESTAMPTZ, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
           updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())""")
+        conn.execute("""CREATE TABLE IF NOT EXISTS company_members(
+          id BIGSERIAL PRIMARY KEY, company_id TEXT NOT NULL, email TEXT NOT NULL,
+          role TEXT NOT NULL DEFAULT 'owner', status TEXT NOT NULL DEFAULT 'active',
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          UNIQUE(company_id,email),
+          CHECK (role IN ('owner','admin','operator','viewer')))""")
     else:
         conn.execute("""CREATE TABLE IF NOT EXISTS companies(
           id TEXT PRIMARY KEY, name TEXT NOT NULL, slug TEXT UNIQUE NOT NULL,
@@ -754,6 +761,12 @@ def init_commercial_db(conn=None):
           status TEXT NOT NULL, provider TEXT NOT NULL DEFAULT 'internal',
           provider_customer_id TEXT, provider_subscription_id TEXT,
           current_period_end TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)""")
+        conn.execute("""CREATE TABLE IF NOT EXISTS company_members(
+          id INTEGER PRIMARY KEY AUTOINCREMENT, company_id TEXT NOT NULL, email TEXT NOT NULL,
+          role TEXT NOT NULL DEFAULT 'owner', status TEXT NOT NULL DEFAULT 'active',
+          created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+          UNIQUE(company_id,email),
+          CHECK (role IN ('owner','admin','operator','viewer')))""")
     if own:
         conn.commit(); conn.close()
 
@@ -814,6 +827,11 @@ def commercial_register(name,email,password):
         trial=time.strftime("%Y-%m-%d %H:%M:%S",time.localtime(time.time()+14*86400))
         conn.execute("INSERT INTO companies(id,name,slug,owner_email,password_hash,trial_ends_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)",(cid,name,slug,email,hash_password(password),trial,now,now))
         conn.execute("INSERT INTO company_subscriptions(company_id,plan,status,current_period_end,created_at,updated_at) VALUES(?,?,?,?,?,?)",(cid,"free","trialing",trial,now,now))
+    # Register the company owner as the first tenant member.
+    if pg:
+        conn.execute("INSERT INTO company_members(company_id,email,role,status) VALUES(%s,%s,%s,%s)",(cid,email,"owner","active"))
+    else:
+        conn.execute("INSERT INTO company_members(company_id,email,role,status,created_at,updated_at) VALUES(?,?,?,?,?,?)",(cid,email,"owner","active",now,now))
     conn.commit()
     conn.close()
     return cid
