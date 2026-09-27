@@ -17,7 +17,7 @@ CARD_PATTERN = re.compile(r"\b(?:\d[ -]*?){13,19}\b")
 def init_leads(conn):
     if is_pg(conn):
         conn.execute("""CREATE TABLE IF NOT EXISTS leads(
-          id TEXT PRIMARY KEY, email TEXT NOT NULL, name TEXT NOT NULL, phone TEXT,
+          id TEXT PRIMARY KEY, company_id TEXT, email TEXT NOT NULL, name TEXT NOT NULL, phone TEXT,
           company TEXT, message TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'NEW',
           research TEXT, qualification_category TEXT, qualification_reason TEXT,
           generated_email TEXT, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -26,12 +26,19 @@ def init_leads(conn):
         )""")
     else:
         conn.execute("""CREATE TABLE IF NOT EXISTS leads(
-          id TEXT PRIMARY KEY, email TEXT NOT NULL, name TEXT NOT NULL, phone TEXT,
+          id TEXT PRIMARY KEY, company_id TEXT, email TEXT NOT NULL, name TEXT NOT NULL, phone TEXT,
           company TEXT, message TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'NEW',
           research TEXT, qualification_category TEXT, qualification_reason TEXT,
           generated_email TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
           CHECK (status IN ('NEW','RESEARCHING','QUALIFIED','PENDING_APPROVAL','SENT','REJECTED','FAILED'))
         )""")
+    if is_pg(conn):
+        conn.execute("ALTER TABLE leads ADD COLUMN IF NOT EXISTS company_id TEXT")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_leads_company_id ON leads(company_id)")
+    else:
+        cols={r["name"] for r in conn.execute("PRAGMA table_info(leads)").fetchall()}
+        if "company_id" not in cols: conn.execute("ALTER TABLE leads ADD COLUMN company_id TEXT")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_leads_company_id ON leads(company_id)")
     init_lead_events(conn)
 
 def init_lead_events(conn):
@@ -48,7 +55,7 @@ def sanitize_phone(value):
     phone = str(value or "").strip()[:80]
     return CARD_PATTERN.sub("[ДАННЫЕ КАРТЫ УДАЛЕНЫ]", phone)
 
-def create_lead(data):
+def create_lead(data, company_id=None):
     if not isinstance(data, dict): raise ValueError("JSON body must be an object")
     name=str(data.get("name","")).strip()[:200]
     email=str(data.get("email","")).strip()[:320]
@@ -64,16 +71,17 @@ def create_lead(data):
     now=time.strftime("%Y-%m-%d %H:%M:%S")
     conn=db()
     if is_pg(conn):
-        conn.execute("INSERT INTO leads(id,email,name,phone,company,message,research,qualification_reason,generated_email) VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s)",(lead_id,email,name,phone,company,message,research,qualification_reason,generated_email))
+        conn.execute("INSERT INTO leads(id,company_id,email,name,phone,company,message,research,qualification_reason,generated_email) VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",(lead_id,company_id,email,name,phone,company,message,research,qualification_reason,generated_email))
     else:
-        conn.execute("INSERT INTO leads(id,email,name,phone,company,message,research,qualification_reason,generated_email,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",(lead_id,email,name,phone,company,message,research,qualification_reason,generated_email,now,now))
+        conn.execute("INSERT INTO leads(id,company_id,email,name,phone,company,message,research,qualification_reason,generated_email,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",(lead_id,company_id,email,name,phone,company,message,research,qualification_reason,generated_email,now,now))
     conn.commit(); conn.close()
     return lead_id
 
-def list_leads(status=None, search=None, limit=100):
+def list_leads(status=None, search=None, limit=100, company_id=None):
     conn=db(); pg=is_pg(conn); limit=min(max(int(limit),1),100)
     search=str(search or "").strip()[:120]; p="%s" if pg else "?"
     clauses=[]; vals=[]
+    if company_id is not None: clauses.append("company_id="+p); vals.append(str(company_id))
     if status: clauses.append("status="+p); vals.append(status)
     if search:
         term="%"+search+"%"
@@ -84,7 +92,7 @@ def list_leads(status=None, search=None, limit=100):
     rs=conn.execute(f"SELECT * FROM leads{where} ORDER BY created_at DESC LIMIT {p}",tuple(vals)).fetchall()
     conn.close(); return [dict(x) for x in rs]
 
-def get_lead(lead_id):
+def get_lead(lead_id, company_id=None):
     conn=db()
     if is_pg(conn):
         r=conn.execute("SELECT * FROM leads WHERE id=%s",(lead_id,)).fetchone()
@@ -93,24 +101,29 @@ def get_lead(lead_id):
     conn.close()
     return dict(r) if r else None
 
-def list_lead_events(lead_id, limit=100):
+def list_lead_events(lead_id, limit=100, company_id=None):
     limit=min(max(int(limit),1),100)
     conn=db(); pg=is_pg(conn); p="%s" if pg else "?"
     try:
-        rs=conn.execute(f"SELECT * FROM lead_events WHERE lead_id={p} ORDER BY id DESC LIMIT {p}",(lead_id,limit)).fetchall()
+        if company_id is None:
+            rs=conn.execute(f"SELECT * FROM lead_events WHERE lead_id={p} ORDER BY id DESC LIMIT {p}",(lead_id,limit)).fetchall()
+        else:
+            rs=conn.execute(f"SELECT e.* FROM lead_events e JOIN leads l ON l.id=e.lead_id WHERE e.lead_id={p} AND l.company_id={p} ORDER BY e.id DESC LIMIT {p}",(lead_id,str(company_id),limit)).fetchall()
     except Exception:
         rs=[]
     conn.close()
     return [dict(x) for x in rs]
 
-def update_lead(lead_id, fields, actor="admin"):
+def update_lead(lead_id, fields, actor="admin", company_id=None):
     if not isinstance(fields, dict): raise ValueError("JSON body must be an object")
     allowed={"status","research","qualification_category","qualification_reason","generated_email"}
     fields={k:v for k,v in fields.items() if k in allowed}
     if "status" in fields and fields["status"] not in LEAD_STATUSES: raise ValueError("invalid lead status")
     if not fields: return False
     conn=db(); pg=is_pg(conn)
-    current = conn.execute("SELECT status FROM leads WHERE id="+("%s" if pg else "?"),(lead_id,)).fetchone()
+    p="%s" if pg else "?"
+    scope=(" AND company_id="+p) if company_id is not None else ""
+    current = conn.execute("SELECT status FROM leads WHERE id="+p+scope,(lead_id,str(company_id)) if company_id is not None else (lead_id,)).fetchone()
     if not current:
         conn.close()
         return False
@@ -126,8 +139,9 @@ def update_lead(lead_id, fields, actor="admin"):
             v=redact_sensitive(v)[:limit]
         sets.append(f"{k}={'%s' if pg else '?'}"); vals.append(v)
     sets.append("updated_at=NOW()" if pg else "updated_at=datetime('now')"); vals.append(lead_id)
-    conn.execute(f"UPDATE leads SET {', '.join(sets)} WHERE id={'%s' if pg else '?'}",vals)
-    changed=conn.execute("SELECT 1 FROM leads WHERE id="+("%s" if pg else "?"),(lead_id,)).fetchone()
+    vals.append(str(company_id)) if company_id is not None else None
+    conn.execute(f"UPDATE leads SET {', '.join(sets)} WHERE id={p}"+scope,vals)
+    changed=conn.execute("SELECT 1 FROM leads WHERE id="+p+scope,(lead_id,str(company_id)) if company_id is not None else (lead_id,)).fetchone()
     if changed:
         import json
         details=json.dumps({"status":{"from":current_status,"to":fields.get("status",current_status)}},ensure_ascii=False)
