@@ -242,32 +242,33 @@ def risky(question):
       "платёжный инцидент":["списали дважды","двойное списание","вернуть деньги","данные карты","номер карты","cvv","cvc"],
       "персональные данные":["покажи данные другого","чужие данные","удали мои данные","паспорт"],
       "юридический вопрос":["подам в суд","юрист","претензия","нарушение закона"],
+      "безопасность":["взломали","утечка","украли пароль","мошенничество"]
+    }
+    for reason,phrases in groups.items():
+        if any(p in q for p in phrases): return reason
+    return None
+
+def redact_sensitive(text):
+    text=re.sub(r"\b(?:\d[ -]*?){13,19}\b","[ДАННЫЕ КАРТЫ УДАЛЕНЫ]",text)
+    return re.sub(r"(?i)\b(cvv|cvc)\s*[:=]?\s*\d{3,4}\b",r"\1 [УДАЛЕНО]",text)
+
 def create_ticket(question,answer,status,reason="",customer_name="",customer_email="",company_id=None):
     conn=db(); q=redact_sensitive(question); a=redact_sensitive(answer)
     if is_pg(conn):
-        cur=conn.execute("""INSERT INTO tickets(chat_id,username,question,answer,status,priority,reason,customer_name,customer_email,company_id)
-          VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id""",
+        cur=conn.execute("""INSERT INTO tickets(chat_id,username,question,answer,status,priority,reason,customer_name,customer_email)
+          VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id""",
           ("web","web-user",q,a,status,"high" if status=="escalated" else "normal",reason,customer_name,customer_email,company_id))
         tid=cur.fetchone()["id"]
     else:
         now=time.strftime("%Y-%m-%d %H:%M:%S")
-        cur=conn.execute("""INSERT INTO tickets(chat_id,username,question,answer,status,priority,reason,customer_name,customer_email,created_at,updated_at,company_id)
-          VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",("web","web-user",q,a,status,"high" if status=="escalated" else "normal",reason,customer_name,customer_email,now,now,company_id))
+        cur=conn.execute("""INSERT INTO tickets(chat_id,username,question,answer,status,priority,reason,customer_name,customer_email,created_at,updated_at)
+          VALUES(?,?,?,?,?,?,?,?,?,?,?)""",("web","web-user",q,a,status,"high" if status=="escalated" else "normal",reason,customer_name,customer_email,now,now,company_id))
         tid=cur.lastrowid
+    # Record the creation event so every ticket has a complete audit trail from the first moment.
     if is_pg(conn):
         conn.execute("INSERT INTO ticket_events(ticket_id,company_id,actor,action,details) VALUES(%s,%s,%s,%s,%s)",(tid,company_id,"system","ticket.created",json.dumps({"status":status,"reason":reason or ""},ensure_ascii=False)))
     else:
         conn.execute("INSERT INTO ticket_events(ticket_id,company_id,actor,action,details,created_at) VALUES(?,?,?,?,?,datetime('now'))",(tid,company_id,"system","ticket.created",json.dumps({"status":status,"reason":reason or ""},ensure_ascii=False)))
-    if status in ("escalated","needs_clarification"):
-        create_notification("ticket","Новое обращение требует внимания",f"Обращение #{tid}: {reason or status}",tid,conn=conn)
-    conn.commit(); conn.close(); return tid
-          VALUES(?,?,?,?,?,?,?,?,?,?,?)""",("web","web-user",q,a,status,"high" if status=="escalated" else "normal",reason,customer_name,customer_email,now,now))
-        tid=cur.lastrowid
-    # Record the creation event so every ticket has a complete audit trail from the first moment.
-    if is_pg(conn):
-        conn.execute("INSERT INTO ticket_events(ticket_id,actor,action,details) VALUES(%s,%s,%s,%s)",(tid,"system","ticket.created",json.dumps({"status":status,"reason":reason or ""},ensure_ascii=False)))
-    else:
-        conn.execute("INSERT INTO ticket_events(ticket_id,actor,action,details,created_at) VALUES(?,?,?,?,datetime('now'))",(tid,"system","ticket.created",json.dumps({"status":status,"reason":reason or ""},ensure_ascii=False)))
     if status in ("escalated","needs_clarification"):
         create_notification("ticket","Новое обращение требует внимания",f"Обращение #{tid}: {reason or status}",tid,conn=conn)
     conn.commit(); conn.close(); return tid
