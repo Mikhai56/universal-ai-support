@@ -208,6 +208,7 @@ def init_db():
     init_finance_db(conn)
     from lead_pipeline import init_leads
     init_leads(conn)
+    init_commercial_db(conn)
     conn.commit(); conn.close()
 
 def words(text):
@@ -705,6 +706,184 @@ def auth(h,permission="read"):
     s=session(h)
     return s if s and permission in ROLE_PERMISSIONS.get(s["role"],set()) else None
 
+
+# ---------- Commercial SaaS layer ----------
+COMMERCIAL_SESSION_COOKIE = "sp_client_session"
+COMMERCIAL_SESSION_TTL = 60 * 60 * 24 * 30
+PLANS = {
+    "free": {"name":"Free Trial","price_eur":0,"trial_days":14,"messages":200,"operators":1,"channels":1},
+    "starter": {"name":"Starter","price_eur":29,"trial_days":0,"messages":3000,"operators":3,"channels":2},
+    "business": {"name":"Business","price_eur":79,"trial_days":0,"messages":15000,"operators":10,"channels":5},
+    "pro": {"name":"Pro","price_eur":199,"trial_days":0,"messages":50000,"operators":25,"channels":10},
+}
+
+def init_commercial_db(conn=None):
+    own=False
+    if conn is None:
+        conn=db(); own=True
+    pg=is_pg(conn)
+    if pg:
+        conn.execute("""CREATE TABLE IF NOT EXISTS companies(
+          id TEXT PRIMARY KEY, name TEXT NOT NULL, slug TEXT UNIQUE NOT NULL,
+          owner_email TEXT UNIQUE NOT NULL, password_hash TEXT NOT NULL,
+          status TEXT NOT NULL DEFAULT 'active', plan TEXT NOT NULL DEFAULT 'free',
+          subscription_status TEXT NOT NULL DEFAULT 'trialing',
+          trial_ends_at TIMESTAMPTZ, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())""")
+        conn.execute("""CREATE TABLE IF NOT EXISTS company_sessions(
+          token TEXT PRIMARY KEY, company_id TEXT NOT NULL, expires_at TIMESTAMPTZ NOT NULL,
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())""")
+        conn.execute("""CREATE TABLE IF NOT EXISTS company_subscriptions(
+          id BIGSERIAL PRIMARY KEY, company_id TEXT NOT NULL, plan TEXT NOT NULL,
+          status TEXT NOT NULL, provider TEXT NOT NULL DEFAULT 'internal',
+          provider_customer_id TEXT, provider_subscription_id TEXT,
+          current_period_end TIMESTAMPTZ, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())""")
+    else:
+        conn.execute("""CREATE TABLE IF NOT EXISTS companies(
+          id TEXT PRIMARY KEY, name TEXT NOT NULL, slug TEXT UNIQUE NOT NULL,
+          owner_email TEXT UNIQUE NOT NULL, password_hash TEXT NOT NULL,
+          status TEXT NOT NULL DEFAULT 'active', plan TEXT NOT NULL DEFAULT 'free',
+          subscription_status TEXT NOT NULL DEFAULT 'trialing',
+          trial_ends_at TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)""")
+        conn.execute("""CREATE TABLE IF NOT EXISTS company_sessions(
+          token TEXT PRIMARY KEY, company_id TEXT NOT NULL, expires_at TEXT NOT NULL,
+          created_at TEXT NOT NULL)""")
+        conn.execute("""CREATE TABLE IF NOT EXISTS company_subscriptions(
+          id INTEGER PRIMARY KEY AUTOINCREMENT, company_id TEXT NOT NULL, plan TEXT NOT NULL,
+          status TEXT NOT NULL, provider TEXT NOT NULL DEFAULT 'internal',
+          provider_customer_id TEXT, provider_subscription_id TEXT,
+          current_period_end TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)""")
+    if own:
+        conn.commit(); conn.close()
+
+def commercial_cookie(token,max_age=COMMERCIAL_SESSION_TTL):
+    secure="; Secure" if SECURE_COOKIES else ""
+    return f"{COMMERCIAL_SESSION_COOKIE}={token}; Path=/; HttpOnly; SameSite=Lax; Max-Age={int(max_age)}{secure}"
+
+def clear_commercial_cookie():
+    secure="; Secure" if SECURE_COOKIES else ""
+    return f"{COMMERCIAL_SESSION_COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0{secure}"
+
+def commercial_token():
+    return secrets.token_urlsafe(40)
+
+def company_from_request(handler):
+    raw=handler.headers.get("Cookie","")
+    token=""
+    for part in raw.split(";"):
+        part=part.strip()
+        if part.startswith(COMMERCIAL_SESSION_COOKIE+"="):
+            token=part.split("=",1)[1]
+            break
+    if not token: return None
+    conn=db()
+    p="%s" if is_pg(conn) else "?"
+    try:
+        rs=conn.execute("SELECT c.* FROM company_sessions s JOIN companies c ON c.id=s.company_id WHERE s.token="+p+" AND s.expires_at>"+("NOW()" if is_pg(conn) else "datetime('now')"),(token,)).fetchone()
+        return row(rs) if rs else None
+    finally:
+        conn.close()
+
+def make_slug(name):
+    base=re.sub(r"[^a-z0-9]+","-",str(name).lower().strip()).strip("-") or "company"
+    slug=base[:40]
+    conn=db(); p="%s" if is_pg(conn) else "?"
+    try:
+        n=0; candidate=slug
+        while conn.execute("SELECT 1 FROM companies WHERE slug="+p,(candidate,)).fetchone():
+            n+=1; candidate=f"{slug}-{n}"
+        return candidate
+    finally: conn.close()
+
+def commercial_register(name,email,password):
+    name=str(name or "").strip()[:120]
+    email=str(email or "").strip().lower()
+    if len(name)<2: raise ValueError("Укажите название компании")
+    if not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+",email): raise ValueError("Укажите корректный email")
+    validate_password(password)
+    conn=db(); pg=is_pg(conn); p="%s" if pg else "?"
+    if conn.execute("SELECT 1 FROM companies WHERE owner_email="+p,(email,)).fetchone():
+        conn.close(); raise ValueError("Компания с таким email уже зарегистрирована")
+    cid=secrets.token_hex(12); slug=make_slug(name)
+    if pg:
+        conn.execute("INSERT INTO companies(id,name,slug,owner_email,password_hash,trial_ends_at) VALUES(%s,%s,%s,%s,%s,NOW()+INTERVAL '14 days')",(cid,name,slug,email,hash_password(password)))
+        conn.execute("INSERT INTO company_subscriptions(company_id,plan,status,current_period_end) VALUES(%s,%s,%s,NOW()+INTERVAL '14 days')",(cid,"free","trialing"))
+    else:
+        now=time.strftime("%Y-%m-%d %H:%M:%S")
+        trial=time.strftime("%Y-%m-%d %H:%M:%S",time.localtime(time.time()+14*86400))
+        conn.execute("INSERT INTO companies(id,name,slug,owner_email,password_hash,trial_ends_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)",(cid,name,slug,email,hash_password(password),trial,now,now))
+        conn.execute("INSERT INTO company_subscriptions(company_id,plan,status,current_period_end,created_at,updated_at) VALUES(?,?,?,?,?,?)",(cid,"free","trialing",trial,now,now))
+    conn.commit()
+    conn.close()
+    return cid
+
+def commercial_login(email,password):
+    conn=db(); p="%s" if is_pg(conn) else "?"
+    c=conn.execute("SELECT * FROM companies WHERE owner_email="+p,(str(email or "").strip().lower(),)).fetchone()
+    if not c or not verify_password(password,c["password_hash"]):
+        conn.close(); raise ValueError("Неверный email или пароль")
+    token=commercial_token()
+    if is_pg(conn):
+        conn.execute("INSERT INTO company_sessions(token,company_id,expires_at) VALUES(%s,%s,NOW()+INTERVAL '30 days')",(token,c["id"]))
+    else:
+        conn.execute("INSERT INTO company_sessions(token,company_id,expires_at,created_at) VALUES(?,?,?,datetime('now'))",(token,c["id"],time.strftime("%Y-%m-%d %H:%M:%S",time.localtime(time.time()+COMMERCIAL_SESSION_TTL)),time.strftime("%Y-%m-%d %H:%M:%S")))
+    conn.commit(); conn.close()
+    return token,row(c)
+
+def commercial_subscribe(company_id,plan):
+    if plan not in PLANS or plan=="free": raise ValueError("Недоступный тариф")
+    env_key="STRIPE_CHECKOUT_"+plan.upper()+"_URL"
+    checkout=os.getenv(env_key,"").strip()
+    conn=db(); p="%s" if is_pg(conn) else "?"
+    now_expr="NOW()" if is_pg(conn) else "datetime('now')"
+    conn.execute("UPDATE companies SET plan="+p+", subscription_status='pending', updated_at="+now_expr+" WHERE id="+p,(plan,company_id))
+    if is_pg(conn):
+        conn.execute("INSERT INTO company_subscriptions(company_id,plan,status,provider) VALUES(%s,%s,%s,%s)",(company_id,plan,"pending","stripe" if checkout else "internal"))
+    else:
+        now=time.strftime("%Y-%m-%d %H:%M:%S")
+        conn.execute("INSERT INTO company_subscriptions(company_id,plan,status,provider,created_at,updated_at) VALUES(?,?,?,?,?,?)",(company_id,plan,"pending","stripe" if checkout else "internal",now,now))
+    conn.commit(); conn.close()
+    return checkout
+
+def commercial_get(handler,path):
+    if path in ("/pricing","/register","/client","/account","/login-client"):
+        files={"\/pricing":"pricing.html","\/register":"register.html","\/client":"account.html","\/account":"account.html","\/login-client":"register.html"}
+        fname=files.get(path,"pricing.html")
+        b=(BASE/"web"/fname).read_bytes()
+        handler.send_response(200); handler.send_header("Content-Type","text/html; charset=utf-8"); handler.send_header("Content-Length",str(len(b))); handler.send_header("Cache-Control","no-store"); handler.end_headers(); handler.wfile.write(b); return True
+    if path=="/api/commercial/me":
+        c=company_from_request(handler)
+        if not c: return handler.send_json({"authenticated":False},200) or True
+        return handler.send_json({"authenticated":True,"company":{"id":c["id"],"name":c["name"],"slug":c["slug"],"email":c["owner_email"],"plan":c["plan"],"subscription_status":c["subscription_status"],"trial_ends_at":c["trial_ends_at"],"status":c["status"]}})
+    return False
+
+def commercial_post(handler,path):
+    if path=="/api/commercial/register":
+        try:
+            p=handler.body(); cid=commercial_register(p.get("company"),p.get("email"),p.get("password"))
+            token,c=commercial_login(p.get("email"),p.get("password"))
+            handler._set_commercial_cookie=token
+            return handler.send_json({"ok":True,"company":{"id":c["id"],"name":c["name"],"slug":c["slug"],"plan":"free","subscription_status":"trialing"}})
+        except ValueError as e: return handler.send_json({"ok":False,"error":str(e)},400)
+    if path=="/api/commercial/login":
+        try:
+            p=handler.body(); token,c=commercial_login(p.get("email"),p.get("password"))
+            handler._set_commercial_cookie=token
+            return handler.send_json({"ok":True,"company":{"id":c["id"],"name":c["name"],"slug":c["slug"],"plan":c["plan"],"subscription_status":c["subscription_status"]}})
+        except ValueError as e: return handler.send_json({"ok":False,"error":str(e)},401)
+    if path=="/api/commercial/logout":
+        handler._clear_commercial_cookie=True
+        return handler.send_json({"ok":True})
+    if path=="/api/commercial/subscribe":
+        c=company_from_request(handler)
+        if not c: return handler.send_json({"error":"authentication required"},401)
+        try:
+            p=handler.body(); plan=str(p.get("plan","")).lower(); checkout=commercial_subscribe(c["id"],plan)
+            return handler.send_json({"ok":True,"plan":plan,"checkout_url":checkout or None,"message":"Откройте оплату Stripe, когда она подключена."})
+        except ValueError as e: return handler.send_json({"error":str(e)},400)
+    return False
+
 class Handler(BaseHTTPRequestHandler):
     def _origin(self):
         allowed={x.strip() for x in os.getenv("CORS_ORIGINS","").split(",") if x.strip()}
@@ -745,6 +924,10 @@ class Handler(BaseHTTPRequestHandler):
         if SECURE_COOKIES:
             self.send_header("Strict-Transport-Security","max-age=31536000; includeSubDomains")
         self.send_header("Content-Security-Policy","default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'")
+        if getattr(self,"_clear_commercial_cookie",False):
+            self.send_header("Set-Cookie",clear_commercial_cookie())
+        elif getattr(self,"_set_commercial_cookie",""):
+            self.send_header("Set-Cookie",commercial_cookie(self._set_commercial_cookie))
         if getattr(self,"_clear_session_cookie",False):
             self.send_header("Set-Cookie",clear_session_cookie())
         elif getattr(self,"_set_session_cookie",""):
@@ -768,6 +951,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Access-Control-Allow-Headers","Content-Type, Authorization"); self.send_header("Access-Control-Allow-Methods","GET,POST,PATCH,DELETE,OPTIONS"); self.end_headers()
     def do_GET(self):
         path=urlparse(self.path).path
+        if commercial_get(self,path): return
         if path=="/api/health":
             conn=None
             try:
@@ -873,8 +1057,9 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         self._set_session_cookie=""
         path=urlparse(self.path).path
-        if path not in ("/api/login","/api/setup-admin","/api/chat","/api/leads") and not self._require_csrf():
+        if path not in ("/api/login","/api/setup-admin","/api/chat","/api/leads","/api/commercial/register","/api/commercial/login","/api/commercial/logout","/api/commercial/subscribe") and not self._require_csrf():
             return
+        if commercial_post(self,path): return
         try: p=self.body()
         except ValueError as e: return self.send_json({"error":str(e)},413 if "large" in str(e) else 400)
         if path=="/api/setup-admin":
