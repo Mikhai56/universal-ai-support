@@ -1107,6 +1107,18 @@ def commercial_get(handler,path):
         c=company_from_request(handler)
         if not c: return handler.send_json({"error":"authentication required"},401) or True
         return handler.send_json({"usage":company_usage(c["id"])})
+    if path=="/api/commercial/invitations/preview":
+        token=parse_qs(urlparse(handler.path).query).get("token",[""])[0]
+        token_hash=hashlib.sha256(str(token).encode()).hexdigest()
+        conn=db(); p="%s" if is_pg(conn) else "?"
+        try:
+            inv=conn.execute("""SELECT email,role,expires_at FROM company_invitations
+                                WHERE token_hash="""+p+""" AND status='pending' AND expires_at>"""+("NOW()" if is_pg(conn) else "datetime('now')"),(token_hash,)).fetchone()
+            if not inv: return handler.send_json({"error":"Приглашение недействительно или истекло"},404)
+            return handler.send_json({"email":inv["email"],"role":inv["role"],"expires_at":inv["expires_at"]})
+        finally:
+            conn.close()
+
     if path=="/api/commercial/invitations":
         c=company_from_request(handler)
         if not c: return handler.send_json({"error":"authentication required"},401)
@@ -1126,7 +1138,7 @@ def commercial_post(handler,path):
         try:
             p=handler.body(); token=create_company_invitation(c,p.get("email"),p.get("role","operator"))
             host=handler.headers.get("Host","")
-            scheme="https" if SECURE_COOKIES else "http"
+            scheme="https" if (SECURE_COOKIES or handler.headers.get("X-Forwarded-Proto")=="https" or host.endswith(".up.railway.app")) else "http"
             return handler.send_json({"ok":True,"email":str(p.get("email","")).strip().lower(),"role":p.get("role","operator"),"invite_url":scheme+"://"+host+"/invite?token="+token},201)
         except ValueError as e: return handler.send_json({"error":str(e)},400)
     if path=="/api/commercial/invitations/accept":
