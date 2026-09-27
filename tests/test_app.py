@@ -39,8 +39,7 @@ class SupportPilotTests(unittest.TestCase):
     def test_ticket_detail_and_validation(self):
         app, path = load_app()
         app.create_operator("operator@example.com", "Operatorpass1234", "operator")
-        result = app.answer_question("Как оформить возврат?")
-        tid = result["ticket_id"]
+        tid = app.create_ticket("Как оформить возврат?", "Ответ", "open")
         ticket = app.get_ticket(tid)
         self.assertEqual(ticket["id"], tid)
         self.assertIn("question", ticket)
