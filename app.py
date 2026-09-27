@@ -399,9 +399,14 @@ def update_ticket(tid, fields, actor="system", company_id=None):
         fields["assignee"]=str(fields["assignee"]).strip().lower()[:254]
         if fields["assignee"]:
             check=db()
-            try: exists=check.execute("SELECT email FROM operators WHERE email="+("%s" if is_pg(check) else "?"),(fields["assignee"],)).fetchone()
+            try:
+                pcheck="%s" if is_pg(check) else "?"
+                if company_id is not None:
+                    exists=check.execute("SELECT email FROM company_members WHERE company_id="+pcheck+" AND lower(email)=lower("+pcheck+") AND status='active' AND role IN ('owner','admin','operator')",(str(company_id),fields["assignee"])).fetchone()
+                else:
+                    exists=check.execute("SELECT email FROM operators WHERE email="+pcheck,(fields["assignee"],)).fetchone()
             finally: check.close()
-            if not exists: raise ValueError("assignee must be an existing operator email")
+            if not exists: raise ValueError("assignee must be an active team operator")
     conn=db(); pg=is_pg(conn); p="%s" if pg else "?"
     scope=(" AND company_id="+p) if company_id is not None else ""; scope_vals=[str(company_id)] if company_id is not None else []
     ticket=conn.execute("SELECT status,priority,assignee FROM tickets WHERE id="+p+scope,(tid,*scope_vals)).fetchone()
@@ -1578,7 +1583,7 @@ class Handler(BaseHTTPRequestHandler):
             company=company_from_request(self)
             if company:
                 if not require_company_permission(self,company,"write"): return
-                try: tid=int(path.rsplit("/",1)[1]); ok=update_ticket(tid,self.body(),actor=company["owner_email"],company_id=company["id"])
+                try: tid=int(path.rsplit("/",1)[1]); ok=update_ticket(tid,self.body(),actor=company.get("member_email") or company["owner_email"],company_id=company["id"])
                 except ValueError as e: return self.send_json({"error":str(e)},400)
                 except Exception: return self.send_json({"error":"ticket update failed"},500)
                 return self.send_json({"ok":bool(ok)})
