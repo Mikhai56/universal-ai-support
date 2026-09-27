@@ -891,6 +891,20 @@ def init_commercial_db(conn=None):
           created_at TEXT NOT NULL, updated_at TEXT NOT NULL)""")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_company_kb_company ON company_kb(company_id,status)")
 
+    if pg:
+        conn.execute("""CREATE TABLE IF NOT EXISTS company_channels(
+          id BIGSERIAL PRIMARY KEY, company_id TEXT NOT NULL, channel_type TEXT NOT NULL,
+          name TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'active', config_json TEXT,
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          UNIQUE(company_id,name))""")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_company_channels_company ON company_channels(company_id,status)")
+    else:
+        conn.execute("""CREATE TABLE IF NOT EXISTS company_channels(
+          id INTEGER PRIMARY KEY AUTOINCREMENT, company_id TEXT NOT NULL, channel_type TEXT NOT NULL,
+          name TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'active', config_json TEXT,
+          created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE(company_id,name))""")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_company_channels_company ON company_channels(company_id,status)")
+
     if own:
         conn.commit(); conn.close()
 
@@ -1057,6 +1071,59 @@ def tenant_local_answer(question,company_id):
 def tenant_kb_context(company_id):
     return company_kb_items(company_id)
 
+def company_channels(company_id):
+    conn=db(); p="%s" if is_pg(conn) else "?"
+    rs=conn.execute("SELECT id,company_id,channel_type,name,status,created_at,updated_at FROM company_channels WHERE company_id="+p+" ORDER BY id",(str(company_id),)).fetchall()
+    conn.close(); return [row(x) for x in rs]
+
+def add_company_channel(company_id,channel_type,name,status="active"):
+    channel_type=str(channel_type or "").strip().lower()
+    name=str(name or "").strip()[:120]
+    status=str(status or "active").strip().lower()
+    if channel_type not in {"web","telegram","email"}: raise ValueError("Недопустимый канал")
+    if status not in {"active","disabled"}: raise ValueError("Недопустимый статус")
+    if not name: raise ValueError("Укажите название канала")
+    usage=company_usage(company_id)
+    active=sum(1 for x in company_channels(company_id) if x.get("status")=="active")
+    if usage and active >= usage["channels"]["limit"]: raise ValueError("Лимит каналов текущего тарифа исчерпан")
+    conn=db(); pg=is_pg(conn)
+    try:
+        if pg: conn.execute("INSERT INTO company_channels(company_id,channel_type,name,status) VALUES(%s,%s,%s,%s)",(str(company_id),channel_type,name,status))
+        else:
+            now=time.strftime("%Y-%m-%d %H:%M:%S")
+            conn.execute("INSERT INTO company_channels(company_id,channel_type,name,status,created_at,updated_at) VALUES(?,?,?,?,?,?)",(str(company_id),channel_type,name,status,now,now))
+        conn.commit()
+    except Exception as exc:
+        conn.close(); raise ValueError("Канал с таким названием уже существует") from exc
+    conn.close(); return True
+
+def update_company_channel(company_id,channel_id,fields):
+    fields={k:v for k,v in (fields or {}).items() if k in {"name","status"}}
+    if "name" in fields:
+        fields["name"]=str(fields["name"] or "").strip()[:120]
+        if not fields["name"]: raise ValueError("Укажите название канала")
+    if "status" in fields and fields["status"] not in {"active","disabled"}: raise ValueError("Недопустимый статус")
+    if not fields: return False
+    conn=db(); pg=is_pg(conn); p="%s" if pg else "?"
+    item=conn.execute("SELECT id,status FROM company_channels WHERE id="+p+" AND company_id="+p,(int(channel_id),str(company_id))).fetchone()
+    if not item: conn.close(); return False
+    if fields.get("status")=="active" and item["status"]!="active":
+        usage=company_usage(company_id)
+        active=sum(1 for x in company_channels(company_id) if x.get("status")=="active")
+        if usage and active >= usage["channels"]["limit"]: conn.close(); raise ValueError("Лимит каналов текущего тарифа исчерпан")
+    sets=[]; vals=[]
+    for k,v in fields.items(): sets.append(k+"="+p); vals.append(v)
+    sets.append("updated_at="+("NOW()" if pg else "datetime('now')"))
+    vals.extend([int(channel_id),str(company_id)])
+    conn.execute("UPDATE company_channels SET "+", ".join(sets)+" WHERE id="+p+" AND company_id="+p,vals)
+    conn.commit(); conn.close(); return True
+
+def delete_company_channel(company_id,channel_id):
+    conn=db(); p="%s" if is_pg(conn) else "?"
+    conn.execute("DELETE FROM company_channels WHERE id="+p+" AND company_id="+p,(int(channel_id),str(company_id)))
+    changed=conn.total_changes
+    conn.commit(); conn.close(); return bool(changed)
+
 def company_usage(company_id):
     conn=db(); pg=is_pg(conn); p="%s" if pg else "?"
     c=conn.execute("SELECT plan FROM companies WHERE id="+p,(str(company_id),)).fetchone()
@@ -1069,7 +1136,7 @@ def company_usage(company_id):
     tickets=int(conn.execute("SELECT COUNT(*) AS n FROM tickets WHERE company_id="+p,(str(company_id),)).fetchone()["n"])
     leads=int(conn.execute("SELECT COUNT(*) AS n FROM leads WHERE company_id="+p,(str(company_id),)).fetchone()["n"]) if _table_exists(conn,"leads") else 0
     conn.close()
-    return {"plan":plan,"messages":{"used":messages,"limit":limits["messages"]},"operators":{"used":operators,"limit":limits["operators"]},"channels":{"limit":limits["channels"]},"tickets":tickets,"leads":leads}
+    return {"plan":plan,"messages":{"used":messages,"limit":limits["messages"]},"operators":{"used":operators,"limit":limits["operators"]},"channels":{"used":int(conn.execute("SELECT COUNT(*) AS n FROM company_channels WHERE company_id="+p+" AND status='active'",(str(company_id),)).fetchone()["n"]) if _table_exists(conn,"company_channels") else 0,"limit":limits["channels"]},"tickets":tickets,"leads":leads}
 
 def _table_exists(conn,name):
     try:
@@ -1272,6 +1339,12 @@ def commercial_get(handler,path):
         if not require_company_permission(handler,c,"manage"): return
         return handler.send_json({"invitations":list_company_invitations(c["id"])})
 
+    if path=="/api/commercial/channels":
+        c=company_from_request(handler)
+        if not require_company_permission(handler,c,"read"): return
+        items=company_channels(c["id"])
+        return handler.send_json({"channels":items,"limit":PLANS.get(c.get("plan"),PLANS["free"])["channels"]})
+
     if path=="/api/commercial/members":
         c=company_from_request(handler)
         if not require_company_permission(handler,c,"read"): return
@@ -1279,6 +1352,15 @@ def commercial_get(handler,path):
     return False
 
 def commercial_post(handler,path):
+    if path=="/api/commercial/channels":
+        c=company_from_request(handler)
+        if not require_company_permission(handler,c,"manage"): return
+        try:
+            p=handler.body()
+            add_company_channel(c["id"],p.get("channel_type","web"),p.get("name"),p.get("status","active"))
+            return handler.send_json({"ok":True,"channels":company_channels(c["id"])},201)
+        except ValueError as e:
+            return handler.send_json({"error":str(e)},400)
     if path=="/api/kb":
         c=company_from_request(handler)
         if not require_company_permission(handler,c,"manage"): return
@@ -1456,6 +1538,15 @@ class Handler(BaseHTTPRequestHandler):
                     return self.send_json({"error":"invalid lead status"},400)
             company=company_from_request(self)
             return self.send_json({"leads":list_leads(status=status,search=search,company_id=company["id"] if company else None)})
+        if path.startswith("/api/commercial/channels/"):
+            c=company_from_request(self)
+            if not require_company_permission(self,c,"manage"): return
+            try:
+                cid=int(path.rsplit("/",1)[1])
+                ok=update_company_channel(c["id"],cid,self.body())
+                return self.send_json({"ok":bool(ok),"channels":company_channels(c["id"])},200 if ok else 404)
+            except (ValueError,TypeError) as e:
+                return self.send_json({"error":str(e)},400)
         if path.startswith("/api/kb/"):
             c=company_from_request(self)
             if not require_company_permission(self,c,"manage"): return
@@ -1705,6 +1796,16 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_json({"ok":True,"leadId":lead_id,"status":"NEW"},202)
         self.send_json({"error":"not found"},404)
     def do_DELETE(self):
+        if self.path.split("?",1)[0].startswith("/api/commercial/channels/"):
+            c=company_from_request(self)
+            if not require_company_permission(self,c,"manage"): return
+            try:
+                cid=int(self.path.split("?",1)[0].rsplit("/",1)[1])
+                ok=delete_company_channel(c["id"],cid)
+                return self.send_json({"ok":bool(ok)},200 if ok else 404)
+            except (ValueError,TypeError) as e:
+                return self.send_json({"error":str(e)},400)
+
         if path.startswith("/api/kb/"):
             c=company_from_request(self)
             if not require_company_permission(self,c,"manage"): return
