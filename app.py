@@ -490,6 +490,66 @@ def list_customers(search=None, limit=200, company_id=None):
     return out[:limit]
 
 
+def get_customer_detail(identifier="", company_id=None):
+    identifier=str(identifier or "").strip()
+    if not identifier or company_id is None:
+        return None
+    conn=db(); pg=is_pg(conn); p="%s" if pg else "?"
+    ident=identifier.lower()
+    # Prefer an exact email match; otherwise use the customer name as the key.
+    tickets=conn.execute(
+        f"SELECT * FROM tickets WHERE company_id={p} AND (lower(customer_email)={p} OR lower(customer_name)={p}) ORDER BY created_at DESC LIMIT 200",
+        (str(company_id),ident,ident)).fetchall()
+    ticket_rows=[row(x) for x in tickets]
+    email=next((str(x.get("customer_email") or "").strip().lower() for x in ticket_rows if x.get("customer_email")), "")
+    name=next((str(x.get("customer_name") or "").strip() for x in ticket_rows if x.get("customer_name")), "")
+    leads=[]
+    try:
+        if email:
+            leads=[row(x) for x in conn.execute(f"SELECT * FROM leads WHERE company_id={p} AND lower(email)={p} ORDER BY created_at DESC LIMIT 100",(str(company_id),email)).fetchall()]
+        else:
+            leads=[row(x) for x in conn.execute(f"SELECT * FROM leads WHERE company_id={p} AND lower(name)={p} ORDER BY created_at DESC LIMIT 100",(str(company_id),ident)).fetchall()]
+    except Exception:
+        leads=[]
+    if not email:
+        email=next((str(x.get("email") or "").strip().lower() for x in leads if x.get("email")), "")
+    if not name:
+        name=next((str(x.get("name") or "").strip() for x in leads if x.get("name")), "")
+    conversations=[]
+    try:
+        if email:
+            conv_rows=conn.execute(f"SELECT * FROM conversations WHERE company_id={p} AND lower(customer_email)={p} ORDER BY updated_at DESC LIMIT 30",(str(company_id),email)).fetchall()
+        else:
+            conv_rows=conn.execute(f"SELECT * FROM conversations WHERE company_id={p} AND lower(customer_name)={p} ORDER BY updated_at DESC LIMIT 30",(str(company_id),ident)).fetchall()
+        for c in conv_rows:
+            cr=row(c)
+            msgs=conn.execute(f"SELECT * FROM messages WHERE conversation_id={p} ORDER BY id ASC LIMIT 100",(cr['id'],)).fetchall()
+            cr["messages"]=[row(x) for x in msgs]
+            conversations.append(cr)
+    except Exception:
+        conversations=[]
+    conn.close()
+    if not ticket_rows and not leads and not conversations:
+        return None
+    all_dates=[x.get("created_at") for x in ticket_rows+leads+conversations if x.get("created_at")]
+    return {
+        "key": email or name.lower() or ident,
+        "name": name or "Клиент",
+        "email": email,
+        "tickets": ticket_rows,
+        "leads": leads,
+        "conversations": conversations,
+        "counts": {
+            "tickets": len(ticket_rows),
+            "open_tickets": sum(1 for x in ticket_rows if x.get("status") in ("open","answered","escalated","needs_clarification")),
+            "escalated_tickets": sum(1 for x in ticket_rows if x.get("status")=="escalated"),
+            "leads": len(leads),
+            "conversations": len(conversations),
+            "messages": sum(len(x.get("messages",[])) for x in conversations)
+        },
+        "last_interaction": max(all_dates, key=str) if all_dates else None
+    }
+
 def _money_amount(value):
     from decimal import Decimal, InvalidOperation
     try:
@@ -1349,6 +1409,13 @@ class Handler(BaseHTTPRequestHandler):
             ticket=get_ticket(tid)
             if not ticket: return self.send_json({"error":"ticket not found"},404)
             return self.send_json({"ticket":ticket,"events":list_ticket_events(tid)})
+        if path=="/api/customers/detail":
+            company=company_from_request(self)
+            if not require_company_permission(self,company,"read"): return
+            params=parse_qs(urlparse(self.path).query)
+            identifier=params.get("email",[""])[0] or params.get("name",[""])[0]
+            detail=get_customer_detail(identifier,company_id=company["id"])
+            return self.send_json({"customer":detail} if detail else {"error":"customer not found"},200 if detail else 404)
         if path=="/api/customers":
             company=company_from_request(self)
             if not company and not self.require(): return
