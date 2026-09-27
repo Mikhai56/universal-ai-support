@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """SupportPilot — production-minded AI customer support app."""
-import hashlib, html, json, os, re, secrets, sqlite3, time, urllib.request, urllib.error
+import hashlib, html, hmac, json, os, re, secrets, sqlite3, time, urllib.request, urllib.error
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
@@ -1305,6 +1305,80 @@ def commercial_subscribe(company_id,plan):
     conn.commit(); conn.close()
     return checkout
 
+def stripe_signature_valid(payload, signature, secret):
+    if not signature or not secret: return False
+    try:
+        parts={}
+        for item in signature.split(","):
+            if "=" in item:
+                k,v=item.split("=",1); parts.setdefault(k,[]).append(v)
+        timestamp=int(parts.get("t",["0"])[0])
+        if abs(time.time()-timestamp)>300: return False
+        signed=str(timestamp).encode()+b"." + payload
+        expected=hmac.new(secret.encode(),signed,hashlib.sha256).hexdigest()
+        return any(secrets.compare_digest(expected,v) for v in parts.get("v1",[]))
+    except Exception:
+        return False
+
+def stripe_apply_event(event):
+    typ=str(event.get("type",""))
+    obj=(event.get("data") or {}).get("object") or {}
+    metadata=obj.get("metadata") or {}
+    company_id=str(metadata.get("company_id") or "").strip()
+    plan=str(metadata.get("plan") or "").strip().lower()
+    if not company_id and obj.get("customer"):
+        conn=db(); p="%s" if is_pg(conn) else "?"
+        q="SELECT company_id,plan FROM company_subscriptions WHERE provider_customer_id="+p+" ORDER BY id DESC LIMIT 1"
+        found=conn.execute(q,(str(obj.get("customer")),)).fetchone(); conn.close()
+        if found: company_id=str(found["company_id"]); plan=plan or str(found["plan"])
+    if not company_id: return False
+    if typ=="checkout.session.completed":
+        sub_id=obj.get("subscription"); customer_id=obj.get("customer")
+        if not plan and obj.get("line_items") is None: plan=metadata.get("plan","")
+        if plan not in PLANS or plan=="free": return False
+        conn=db(); pg=is_pg(conn); p="%s" if pg else "?"
+        if pg:
+            conn.execute("UPDATE companies SET plan=%s,subscription_status='active',updated_at=NOW() WHERE id=%s",(plan,company_id))
+            conn.execute("UPDATE company_subscriptions SET status='active',provider='stripe',provider_customer_id=%s,provider_subscription_id=%s,updated_at=NOW() WHERE company_id=%s AND plan=%s AND status='pending'",(customer_id,sub_id,company_id,plan))
+        else:
+            conn.execute("UPDATE companies SET plan=?,subscription_status='active',updated_at=datetime('now') WHERE id=?",(plan,company_id))
+            conn.execute("UPDATE company_subscriptions SET status='active',provider='stripe',provider_customer_id=?,provider_subscription_id=?,updated_at=datetime('now') WHERE company_id=? AND plan=? AND status='pending'",(customer_id,sub_id,company_id,plan))
+        conn.commit(); conn.close(); return True
+    if typ in {"customer.subscription.updated","customer.subscription.deleted"}:
+        sub_id=str(obj.get("id") or "").strip(); status=str(obj.get("status") or ("canceled" if typ.endswith("deleted") else "")).lower()
+        active=status in {"active","trialing"}
+        if not plan:
+            plan=metadata.get("plan","")
+        conn=db(); pg=is_pg(conn); p="%s" if pg else "?"
+        existing=conn.execute("SELECT plan FROM company_subscriptions WHERE provider_subscription_id="+p+" ORDER BY id DESC LIMIT 1",(sub_id,)).fetchone()
+        if existing and not plan: plan=str(existing["plan"])
+        if plan not in PLANS or plan=="free": plan="starter" if existing and str(existing["plan"])=="starter" else plan
+        if not plan: conn.close(); return False
+        new_status="active" if active else ("canceled" if status in {"canceled","unpaid","incomplete_expired"} else status or "pending")
+        if pg:
+            conn.execute("UPDATE company_subscriptions SET status=%s,updated_at=NOW() WHERE provider_subscription_id=%s",(new_status,sub_id))
+            conn.execute("UPDATE companies SET subscription_status=%s,updated_at=NOW() WHERE id=%s",(new_status,company_id))
+        else:
+            conn.execute("UPDATE company_subscriptions SET status=?,updated_at=datetime('now') WHERE provider_subscription_id=?",(new_status,sub_id))
+            conn.execute("UPDATE companies SET subscription_status=?,updated_at=datetime('now') WHERE id=?",(new_status,company_id))
+        conn.commit(); conn.close(); return True
+    return False
+
+def handle_stripe_webhook(handler):
+    secret=os.getenv("STRIPE_WEBHOOK_SECRET","").strip()
+    if not secret: return handler.send_json({"error":"Stripe webhook is not configured"},503)
+    try:
+        length=int(handler.headers.get("Content-Length","0"))
+        if length>1024*1024: return handler.send_json({"error":"payload too large"},413)
+        payload=handler.rfile.read(length)
+        if not stripe_signature_valid(payload,handler.headers.get("Stripe-Signature",""),secret):
+            return handler.send_json({"error":"invalid signature"},400)
+        event=json.loads(payload.decode("utf-8"))
+        stripe_apply_event(event)
+        return handler.send_json({"received":True})
+    except Exception as exc:
+        return handler.send_json({"error":"invalid webhook payload"},400)
+
 def commercial_get(handler,path):
     if path=="/invite":
         p=parse_qs(urlparse(handler.path).query).get("token",[""])[0]
@@ -1650,7 +1724,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         self._set_session_cookie=""
         path=urlparse(self.path).path
-        if path not in ("/api/login","/api/setup-admin","/api/chat","/api/leads","/api/commercial/register","/api/commercial/login","/api/commercial/logout","/api/commercial/subscribe","/api/commercial/invitations","/api/commercial/invitations/accept") and not self._require_csrf():
+        if path != "/api/webhooks/stripe" and path not in ("/api/login","/api/setup-admin","/api/chat","/api/leads","/api/commercial/register","/api/commercial/login","/api/commercial/logout","/api/commercial/subscribe","/api/commercial/invitations","/api/commercial/invitations/accept") and not self._require_csrf():
             return
         if commercial_post(self,path): return
         try: p=self.body()
