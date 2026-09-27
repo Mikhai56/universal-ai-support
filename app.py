@@ -848,7 +848,7 @@ def commercial_subscribe(company_id,plan):
 
 def commercial_get(handler,path):
     if path in ("/pricing","/register","/client","/account","/login-client"):
-        files={"\/pricing":"pricing.html","\/register":"register.html","\/client":"account.html","\/account":"account.html","\/login-client":"register.html"}
+        files={"/pricing":"pricing.html","/register":"register.html","/client":"account.html","/account":"account.html","/login-client":"register.html"}
         fname=files.get(path,"pricing.html")
         b=(BASE/"web"/fname).read_bytes()
         handler.send_response(200); handler.send_header("Content-Type","text/html; charset=utf-8"); handler.send_header("Content-Length",str(len(b))); handler.send_header("Cache-Control","no-store"); handler.end_headers(); handler.wfile.write(b); return True
