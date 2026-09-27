@@ -148,6 +148,9 @@ def db():
 
 def is_pg(conn): return conn.__class__.__module__.startswith("psycopg")
 
+def row(value):
+    return dict(value)
+
 def init_db():
     conn = db()
     if is_pg(conn):
