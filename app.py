@@ -707,7 +707,7 @@ def crypto_wallet_balances():
     for w in wallets:
         txs=list_crypto_transactions(w["id"])
         balance=sum((Decimal(str(t["amount"])) if t["direction"]=="in" else -Decimal(str(t["amount"])) for t in txs),Decimal("0"))
-        w["balance"]=format(balance,"f")
+        w["balance"]=format(balance,".6f")
     return wallets
 
 def stats(company_id=None):
