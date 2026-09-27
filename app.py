@@ -1135,8 +1135,9 @@ def company_usage(company_id):
     operators=int(conn.execute("SELECT COUNT(*) AS n FROM company_members WHERE company_id="+p+" AND status='active'",(str(company_id),)).fetchone()["n"])
     tickets=int(conn.execute("SELECT COUNT(*) AS n FROM tickets WHERE company_id="+p,(str(company_id),)).fetchone()["n"])
     leads=int(conn.execute("SELECT COUNT(*) AS n FROM leads WHERE company_id="+p,(str(company_id),)).fetchone()["n"]) if _table_exists(conn,"leads") else 0
+    channels_used=int(conn.execute("SELECT COUNT(*) AS n FROM company_channels WHERE company_id="+p+" AND status='active'",(str(company_id),)).fetchone()["n"]) if _table_exists(conn,"company_channels") else 0
     conn.close()
-    return {"plan":plan,"messages":{"used":messages,"limit":limits["messages"]},"operators":{"used":operators,"limit":limits["operators"]},"channels":{"used":int(conn.execute("SELECT COUNT(*) AS n FROM company_channels WHERE company_id="+p+" AND status='active'",(str(company_id),)).fetchone()["n"]) if _table_exists(conn,"company_channels") else 0,"limit":limits["channels"]},"tickets":tickets,"leads":leads}
+    return {"plan":plan,"messages":{"used":messages,"limit":limits["messages"]},"operators":{"used":operators,"limit":limits["operators"]},"channels":{"used":channels_used,"limit":limits["channels"]},"tickets":tickets,"leads":leads}
 
 def _table_exists(conn,name):
     try:
