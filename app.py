@@ -1711,6 +1711,20 @@ class Handler(BaseHTTPRequestHandler):
             except (ValueError,TypeError) as e: return self.send_json({"error":str(e)},400)
             return self.send_json({"ok":bool(ok)},200 if ok else 404)
 
+        if path.startswith("/api/operators/"):
+            if not self.require("manage"): return
+            from urllib.parse import unquote
+            email=unquote(path.rsplit("/",1)[1]).strip().lower()
+            try:
+                body=self.body()
+                ok=update_operator(email,body)
+            except ValueError as e:
+                return self.send_json({"error":str(e)},400)
+            except Exception as e:
+                print(f"operator update failed: {e}",flush=True)
+                return self.send_json({"error":"operator update failed"},500)
+            return self.send_json({"ok":bool(ok)},200 if ok else 404)
+
         if path.startswith("/api/leads/"):
             company=company_from_request(self)
             if company and not require_company_permission(self,company,"write"): return
@@ -1965,6 +1979,7 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_json({"ok":True,"leadId":lead_id,"status":"NEW"},202)
         self.send_json({"error":"not found"},404)
     def do_DELETE(self):
+        path=urlparse(self.path).path
         if not self._require_csrf():
             return
         if self.path.split("?",1)[0].startswith("/api/commercial/channels/"):
@@ -1987,7 +2002,6 @@ class Handler(BaseHTTPRequestHandler):
             except (ValueError,TypeError) as e:
                 return self.send_json({"error":str(e)},400)
 
-        path=urlparse(self.path).path
         if path.startswith("/api/commercial/members/"):
             c=company_from_request(self)
             if not require_company_permission(self,c,"manage"): return
