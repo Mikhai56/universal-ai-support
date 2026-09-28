@@ -1685,46 +1685,6 @@ class Handler(BaseHTTPRequestHandler):
                     return self.send_json({"error":"invalid lead status"},400)
             company=company_from_request(self)
             return self.send_json({"leads":list_leads(status=status,search=search,company_id=company["id"] if company else None)})
-        if path.startswith("/api/commercial/channels/"):
-            c=company_from_request(self)
-            if not require_company_permission(self,c,"manage"): return
-            try:
-                cid=int(path.rsplit("/",1)[1])
-                ok=update_company_channel(c["id"],cid,self.body())
-                return self.send_json({"ok":bool(ok),"channels":company_channels(c["id"])},200 if ok else 404)
-            except (ValueError,TypeError) as e:
-                return self.send_json({"error":str(e)},400)
-        if path.startswith("/api/kb/"):
-            c=company_from_request(self)
-            if not require_company_permission(self,c,"manage"): return
-            try:
-                item_id=int(path.rsplit("/",1)[1])
-                ok=update_company_kb(c["id"],item_id,self.body())
-                return self.send_json({"ok":bool(ok),"items":company_kb_items(c["id"])},200 if ok else 404)
-            except (ValueError,TypeError) as e:
-                return self.send_json({"error":str(e)},400)
-        if path.startswith("/api/commercial/members/"):
-            c=company_from_request(self)
-            if not require_company_permission(self,c,"manage"): return
-            try:
-                ok=update_company_member(c["id"],int(path.rsplit("/",1)[1]),self.body())
-            except (ValueError,TypeError) as e: return self.send_json({"error":str(e)},400)
-            return self.send_json({"ok":bool(ok)},200 if ok else 404)
-
-        if path.startswith("/api/operators/"):
-            if not self.require("manage"): return
-            from urllib.parse import unquote
-            email=unquote(path.rsplit("/",1)[1]).strip().lower()
-            try:
-                body=self.body()
-                ok=update_operator(email,body)
-            except ValueError as e:
-                return self.send_json({"error":str(e)},400)
-            except Exception as e:
-                print(f"operator update failed: {e}",flush=True)
-                return self.send_json({"error":"operator update failed"},500)
-            return self.send_json({"ok":bool(ok)},200 if ok else 404)
-
         if path.startswith("/api/leads/"):
             company=company_from_request(self)
             if company and not require_company_permission(self,company,"write"): return
@@ -1758,12 +1718,6 @@ class Handler(BaseHTTPRequestHandler):
             ticket=get_ticket(tid,company_id=company["id"] if company else None)
             if not ticket: return self.send_json({"error":"ticket not found"},404)
             return self.send_json({"ticket":ticket,"events":list_ticket_events(tid,company_id=company["id"] if company else None)})
-            if not self.require(): return
-            try: tid=int(path.rsplit("/",1)[1])
-            except ValueError: return self.send_json({"error":"invalid ticket id"},400)
-            ticket=get_ticket(tid)
-            if not ticket: return self.send_json({"error":"ticket not found"},404)
-            return self.send_json({"ticket":ticket,"events":list_ticket_events(tid)})
         if path=="/api/customers/detail":
             company=company_from_request(self)
             if not require_company_permission(self,company,"read"): return
@@ -2020,6 +1974,43 @@ class Handler(BaseHTTPRequestHandler):
         path=urlparse(self.path).path
         if not self._require_csrf():
             return
+        if path.startswith("/api/commercial/channels/"):
+            c=company_from_request(self)
+            if not require_company_permission(self,c,"manage"): return
+            try:
+                cid=int(path.rsplit("/",1)[1])
+                ok=update_company_channel(c["id"],cid,self.body())
+                return self.send_json({"ok":bool(ok),"channels":company_channels(c["id"])},200 if ok else 404)
+            except (ValueError,TypeError) as e:
+                return self.send_json({"error":str(e)},400)
+        if path.startswith("/api/kb/"):
+            c=company_from_request(self)
+            if not require_company_permission(self,c,"manage"): return
+            try:
+                item_id=int(path.rsplit("/",1)[1])
+                ok=update_company_kb(c["id"],item_id,self.body())
+                return self.send_json({"ok":bool(ok),"items":company_kb_items(c["id"])},200 if ok else 404)
+            except (ValueError,TypeError) as e:
+                return self.send_json({"error":str(e)},400)
+        if path.startswith("/api/commercial/members/"):
+            c=company_from_request(self)
+            if not require_company_permission(self,c,"manage"): return
+            try:
+                ok=update_company_member(c["id"],int(path.rsplit("/",1)[1]),self.body())
+            except (ValueError,TypeError) as e: return self.send_json({"error":str(e)},400)
+            return self.send_json({"ok":bool(ok)},200 if ok else 404)
+        if path.startswith("/api/operators/"):
+            if not self.require("manage"): return
+            from urllib.parse import unquote
+            email=unquote(path.rsplit("/",1)[1]).strip().lower()
+            try:
+                ok=update_operator(email,self.body())
+            except ValueError as e:
+                return self.send_json({"error":str(e)},400)
+            except Exception as e:
+                print(f"operator update failed: {e}",flush=True)
+                return self.send_json({"error":"operator update failed"},500)
+            return self.send_json({"ok":bool(ok)},200 if ok else 404)
         if path.startswith("/api/notifications/") and path.endswith("/read"):
             s=self.require("write")
             if not s: return
