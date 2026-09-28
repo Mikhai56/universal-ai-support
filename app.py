@@ -1727,7 +1727,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         self._set_session_cookie=""
         path=urlparse(self.path).path
-        if path != "/api/webhooks/stripe" and path not in ("/api/login","/api/setup-admin","/api/chat","/api/leads","/api/commercial/register","/api/commercial/login","/api/commercial/logout","/api/commercial/subscribe","/api/commercial/invitations","/api/commercial/invitations/accept") and not self._require_csrf():
+        if path != "/api/webhooks/stripe" and path not in ("/api/login","/api/setup-admin","/api/chat","/api/leads","/api/commercial/register","/api/commercial/login","/api/commercial/logout","/api/commercial/invitations/accept") and not self._require_csrf():
             return
         if commercial_post(self,path): return
         try: p=self.body()
@@ -1874,6 +1874,8 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_json({"ok":True,"leadId":lead_id,"status":"NEW"},202)
         self.send_json({"error":"not found"},404)
     def do_DELETE(self):
+        if not self._require_csrf():
+            return
         if self.path.split("?",1)[0].startswith("/api/commercial/channels/"):
             c=company_from_request(self)
             if not require_company_permission(self,c,"manage"): return
@@ -1895,8 +1897,6 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json({"error":str(e)},400)
 
         path=urlparse(self.path).path
-        if not self._require_csrf():
-            return
         if path.startswith("/api/commercial/members/"):
             c=company_from_request(self)
             if not require_company_permission(self,c,"manage"): return
