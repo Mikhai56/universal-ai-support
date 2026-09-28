@@ -16,6 +16,7 @@ AI_MODEL = os.getenv("AI_MODEL", "gpt-4o-mini")
 ADMIN_EMAIL = os.getenv("ADMIN_EMAIL", "admin@supportpilot.local")
 ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "")
 OPERATORS_JSON = os.getenv("OPERATORS_JSON", "")
+SUPPORTPILOT_INTERNAL_TOKEN = os.getenv("SUPPORTPILOT_INTERNAL_TOKEN", "").strip()
 MAX_MESSAGE_CHARS = min(max(int(os.getenv("MAX_MESSAGE_CHARS", "4096")), 128), 16384)
 TOKEN_TTL = 60 * 60 * 12
 PASSWORD_MIN_LENGTH = 12
@@ -1767,11 +1768,25 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         self._set_session_cookie=""
         path=urlparse(self.path).path
-        if path != "/api/webhooks/stripe" and path not in ("/api/login","/api/setup-admin","/api/chat","/api/leads","/api/commercial/register","/api/commercial/login","/api/commercial/logout","/api/commercial/invitations/accept") and not self._require_csrf():
+        if path != "/api/webhooks/stripe" and path not in ("/api/login","/api/setup-admin","/api/chat","/api/leads","/api/commercial/register","/api/commercial/login","/api/commercial/logout","/api/commercial/invitations/accept","/api/internal/telegram/tickets") and not self._require_csrf():
             return
         if commercial_post(self,path): return
         try: p=self.body()
         except ValueError as e: return self.send_json({"error":str(e)},413 if "large" in str(e) else 400)
+        if path=="/api/internal/telegram/tickets":
+            supplied=(self.headers.get("Authorization") or "").replace("Bearer ","").strip()
+            if not SUPPORTPILOT_INTERNAL_TOKEN or not hmac.compare_digest(supplied,SUPPORTPILOT_INTERNAL_TOKEN):
+                return self.send_json({"error":"unauthorized"},401)
+            try:
+                q=redact_sensitive(str(p.get("question","")).strip())[:MAX_MESSAGE_CHARS]
+                ans=redact_sensitive(str(p.get("answer","")).strip())[:MAX_MESSAGE_CHARS]
+                status=str(p.get("status","open"))
+                reason=str(p.get("reason","telegram"))
+                if not q or not ans: return self.send_json({"error":"question and answer are required"},400)
+                tid=create_ticket(q,ans,status,reason,str(p.get("customer_name","")),str(p.get("customer_email","")),None)
+                return self.send_json({"ok":True,"ticket_id":tid},201)
+            except Exception:
+                return self.send_json({"error":"telegram ticket sync failed"},500)
         if path=="/api/setup-admin":
             email=str(p.get("email","")).strip().lower()
             password=str(p.get("password",""))
