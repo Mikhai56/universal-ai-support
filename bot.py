@@ -9,6 +9,8 @@ TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 ADMIN_CHAT_ID = os.getenv("ADMIN_CHAT_ID", "").strip()
 DB_PATH = os.getenv("DB_PATH", "/var/data/supportpilot.db")
 KB_PATH = os.getenv("KB_PATH", str(BASE / "knowledge_base.json"))
+WEB_URL = os.getenv("SUPPORTPILOT_WEB_URL", "").rstrip("/")
+INTERNAL_TOKEN = os.getenv("SUPPORTPILOT_INTERNAL_TOKEN", "").strip()
 TG_API = "https://api.telegram.org/bot" + TOKEN
 
 def positive_int(name, default, minimum=1, maximum=1_000_000):
@@ -89,10 +91,22 @@ def risky(question):
         if any(p in normalized for p in phrases): return reason
     return None
 
+def sync_web_ticket(question,answer,status,reason,username=""):
+    if not WEB_URL or not INTERNAL_TOKEN: return
+    try:
+        payload={"question":safe_text(question),"answer":safe_text(answer),"status":status,"reason":reason or "telegram","customer_name":username}
+        req=urllib.request.Request(WEB_URL+"/api/internal/telegram/tickets",data=json.dumps(payload,ensure_ascii=False).encode(),headers={"Content-Type":"application/json","Authorization":"Bearer "+INTERNAL_TOKEN})
+        with urllib.request.urlopen(req,timeout=5) as response:
+            if response.status >= 300: raise RuntimeError(f"HTTP {response.status}")
+    except Exception as error:
+        print(f"Web ticket sync failed: {error}",flush=True)
+
 def create_ticket(chat_id,username,question,answer,status,reason):
     question=safe_text(question); username=safe_text(username)[:64]; answer=safe_text(answer)
     conn=db(); cur=conn.execute("INSERT INTO tickets(chat_id,username,question,answer,status,reason,created_at) VALUES(?,?,?,?,?,?,?)",(str(chat_id),username,question,answer,status,reason,now()))
-    ticket_id=cur.lastrowid; conn.commit(); conn.close(); return ticket_id
+    ticket_id=cur.lastrowid; conn.commit(); conn.close()
+    sync_web_ticket(question,answer,status,reason,username)
+    return ticket_id
 
 def escalate(chat_id,username,question,reason,public_answer=None):
     question=safe_text(question)
