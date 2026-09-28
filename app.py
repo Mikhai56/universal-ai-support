@@ -850,7 +850,11 @@ def session(h):
         exp=rs["expires_at"]
         if hasattr(exp,"timestamp"): expires=exp.timestamp()
         else:
-            expires=datetime.fromisoformat(str(exp).replace("Z","+00:00")).timestamp() if "T" in str(exp) else time.mktime(time.strptime(str(exp)[:19],"%Y-%m-%d %H:%M:%S"))
+            raw=str(exp).replace("Z","")
+            try:
+                expires=time.mktime(time.strptime(raw[:19],"%Y-%m-%d %H:%M:%S"))
+            except Exception:
+                expires=0
         if expires<=time.time():
             conn.execute("DELETE FROM operator_sessions WHERE token="+p,(token,)); conn.commit(); return None
         s={"expires":expires,"email":rs["email"],"role":rs["role"]}; SESSIONS[token]=s; return s
