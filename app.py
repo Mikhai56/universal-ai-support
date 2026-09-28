@@ -196,6 +196,21 @@ def init_db():
           created_at TEXT NOT NULL, CHECK (role IN ('admin','operator','viewer')))
         """)
     if is_pg(conn):
+        conn.execute("ALTER TABLE operators ADD COLUMN IF NOT EXISTS display_name TEXT")
+        conn.execute("ALTER TABLE operators ADD COLUMN IF NOT EXISTS phone TEXT")
+        conn.execute("ALTER TABLE operators ADD COLUMN IF NOT EXISTS timezone TEXT DEFAULT 'Europe/Helsinki'")
+        conn.execute("""CREATE TABLE IF NOT EXISTS operator_sessions(
+          token TEXT PRIMARY KEY, email TEXT NOT NULL, role TEXT NOT NULL,
+          expires_at TIMESTAMPTZ NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())""")
+    else:
+        oc={r["name"] for r in conn.execute("PRAGMA table_info(operators)").fetchall()}
+        if "display_name" not in oc: conn.execute("ALTER TABLE operators ADD COLUMN display_name TEXT")
+        if "phone" not in oc: conn.execute("ALTER TABLE operators ADD COLUMN phone TEXT")
+        if "timezone" not in oc: conn.execute("ALTER TABLE operators ADD COLUMN timezone TEXT DEFAULT 'Europe/Helsinki'")
+        conn.execute("""CREATE TABLE IF NOT EXISTS operator_sessions(
+          token TEXT PRIMARY KEY, email TEXT NOT NULL, role TEXT NOT NULL,
+          expires_at TEXT NOT NULL, created_at TEXT NOT NULL)""")
+    if is_pg(conn):
         conn.execute("""CREATE TABLE IF NOT EXISTS conversations(
           id TEXT PRIMARY KEY, company_id TEXT, customer_name TEXT, customer_email TEXT,
           created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())""")
@@ -770,8 +785,51 @@ def mark_notification_read(notification_id,recipient):
     rs=conn.execute("UPDATE notifications SET read_at="+("NOW()" if pg else "datetime('now')")+" WHERE id="+p+" AND recipient="+p,(notification_id,recipient))
     conn.commit(); changed=rs.rowcount; conn.close(); return bool(changed)
 
+def get_operator_profile(email):
+    conn=db(); p="%s" if is_pg(conn) else "?"
+    try:
+        rs=conn.execute("SELECT email,role,display_name,phone,timezone,created_at FROM operators WHERE lower(email)=lower("+p+")",(str(email or ""),)).fetchone()
+        return row(rs) if rs else None
+    finally: conn.close()
+
+def update_operator_profile(email,fields):
+    allowed={"display_name","phone","timezone"}
+    fields={k:str(v or "").strip()[:160] for k,v in (fields or {}).items() if k in allowed}
+    if not fields: return get_operator_profile(email)
+    conn=db(); p="%s" if is_pg(conn) else "?"
+    try:
+        sets=[]; vals=[]
+        for k,v in fields.items(): sets.append(k+"="+p); vals.append(v)
+        vals.append(str(email or "").lower())
+        conn.execute("UPDATE operators SET "+",".join(sets)+" WHERE lower(email)=lower("+p+")",tuple(vals))
+        conn.commit()
+        return get_operator_profile(email)
+    finally: conn.close()
+
+def change_operator_password(email,old_password,new_password):
+    validate_password(new_password)
+    conn=db(); p="%s" if is_pg(conn) else "?"
+    try:
+        rs=conn.execute("SELECT password_hash FROM operators WHERE lower(email)=lower("+p+")",(str(email or ""),)).fetchone()
+        if not rs or not verify_password(old_password,rs["password_hash"]): raise ValueError("Текущий пароль указан неверно")
+        conn.execute("UPDATE operators SET password_hash="+p+" WHERE lower(email)=lower("+p+")",(hash_password(new_password),str(email or "")))
+        conn.execute("DELETE FROM operator_sessions WHERE lower(email)=lower("+p+")",(str(email or ""),))
+        conn.commit()
+    finally: conn.close()
+    return True
+
 def make_token(email,role):
-    t=secrets.token_urlsafe(32); SESSIONS[t]={"expires":time.time()+TOKEN_TTL,"email":email,"role":role}; return t
+    t=secrets.token_urlsafe(32); expires=time.time()+TOKEN_TTL
+    SESSIONS[t]={"expires":expires,"email":email,"role":role}
+    conn=db(); p="%s" if is_pg(conn) else "?"
+    try:
+        if is_pg(conn):
+            conn.execute("INSERT INTO operator_sessions(token,email,role,expires_at) VALUES(%s,%s,%s,NOW()+(%s * INTERVAL '1 second'))",(t,email,role,int(TOKEN_TTL)))
+        else:
+            conn.execute("INSERT INTO operator_sessions(token,email,role,expires_at,created_at) VALUES(?,?,?,?,datetime('now'))",(t,email,role,time.strftime("%Y-%m-%d %H:%M:%S",time.gmtime(expires))))
+        conn.commit()
+    finally: conn.close()
+    return t
 def session_token(h):
     token=(h.get("Authorization") or "").replace("Bearer ","").strip()
     if token: return token
@@ -785,8 +843,18 @@ def session(h):
     token=session_token(h)
     s=SESSIONS.get(token)
     if s and s["expires"]>time.time(): return s
-    if token: SESSIONS.pop(token,None)
-    return None
+    conn=db(); p="%s" if is_pg(conn) else "?"
+    try:
+        rs=conn.execute("SELECT email,role,expires_at FROM operator_sessions WHERE token="+p,(token,)).fetchone() if token else None
+        if not rs: return None
+        exp=rs["expires_at"]
+        if hasattr(exp,"timestamp"): expires=exp.timestamp()
+        else:
+            expires=datetime.fromisoformat(str(exp).replace("Z","+00:00")).timestamp() if "T" in str(exp) else time.mktime(time.strptime(str(exp)[:19],"%Y-%m-%d %H:%M:%S"))
+        if expires<=time.time():
+            conn.execute("DELETE FROM operator_sessions WHERE token="+p,(token,)); conn.commit(); return None
+        s={"expires":expires,"email":rs["email"],"role":rs["role"]}; SESSIONS[token]=s; return s
+    finally: conn.close()
 
 def auth(h,permission="read"):
     s=session(h)
@@ -1575,7 +1643,7 @@ class Handler(BaseHTTPRequestHandler):
         if path=="/api/me":
             s=self.require()
             if not s: return
-            return self.send_json({"user":{"email":s["email"],"role":s["role"]}})
+            return self.send_json({"user":get_operator_profile(s["email"]) or {"email":s["email"],"role":s["role"]}})
         if path=="/api/operators":
             if not self.require("manage"): return
             return self.send_json({"operators":list_operators()})
@@ -1841,8 +1909,27 @@ class Handler(BaseHTTPRequestHandler):
             if not question or not answer: return self.send_json({"error":"question and answer are required"},400)
             tid=create_ticket(question,answer,str(p.get("status","open")),str(p.get("reason","")),str(p.get("customer_name","")),str(p.get("customer_email","")),company_id=company["id"])
             return self.send_json({"ok":True,"ticket_id":tid},201)
+        if path=="/api/profile":
+            s=self.require("write")
+            if not s: return
+            try:
+                p=self.body()
+                if p.get("action")=="password":
+                    change_operator_password(s["email"],str(p.get("current_password","")),str(p.get("new_password","")))
+                    token=session_token(self.headers)
+                    conn=db(); q="%s" if is_pg(conn) else "?"
+                    conn.execute("DELETE FROM operator_sessions WHERE token="+q,(token,)); conn.commit(); conn.close()
+                    SESSIONS.pop(token,None); self._clear_session_cookie=True; self._set_session_cookie=""
+                    return self.send_json({"ok":True,"reauth_required":True})
+                return self.send_json({"ok":True,"user":update_operator_profile(s["email"],p)})
+            except ValueError as e:
+                return self.send_json({"error":str(e)},400)
         if path=="/api/logout":
             token=session_token(self.headers); SESSIONS.pop(token,None)
+            conn=db(); q="%s" if is_pg(conn) else "?"
+            if token:
+                conn.execute("DELETE FROM operator_sessions WHERE token="+q,(token,)); conn.commit()
+            conn.close()
             self._clear_session_cookie=True
             self._set_session_cookie=""
             return self.send_json({"ok":True})
