@@ -1697,17 +1697,17 @@ class Handler(BaseHTTPRequestHandler):
             if not self.require(): return
             return self.send_json(stats())
         if path=="/api/finance/accounts":
-            if not self.require(): return
+            if not self.require("manage"): return
             return self.send_json({"accounts":list_money_accounts(),"transactions":list_money_transactions()})
         if path=="/api/finance/transactions":
-            if not self.require(): return
+            if not self.require("manage"): return
             account_id=parse_qs(urlparse(self.path).query).get("account_id",[None])[0]
             return self.send_json({"transactions":list_money_transactions(account_id)})
         if path=="/api/crypto/wallets":
-            if not self.require(): return
+            if not self.require("manage"): return
             return self.send_json({"wallets":crypto_wallet_balances(),"transactions":list_crypto_transactions()})
         if path=="/api/crypto/transactions":
-            if not self.require(): return
+            if not self.require("manage"): return
             wallet_id=parse_qs(urlparse(self.path).query).get("wallet_id",[None])[0]
             return self.send_json({"transactions":list_crypto_transactions(wallet_id)})
         if path=="/api/notifications":
@@ -1810,25 +1810,25 @@ class Handler(BaseHTTPRequestHandler):
             except ValueError as e: return self.send_json({"error":str(e)},400)
             return self.send_json({"ok":True},201)
         if path=="/api/finance/accounts":
-            s=self.require("write")
+            s=self.require("manage")
             if not s: return
             try: create_money_account(p.get("name"),p.get("currency","EUR"))
             except ValueError as e: return self.send_json({"error":str(e)},400)
             return self.send_json({"ok":True},201)
         if path=="/api/finance/transactions":
-            s=self.require("write")
+            s=self.require("manage")
             if not s: return
             try: record_money_transaction(p.get("account_id"),p.get("kind"),p.get("amount"),p.get("description"),p.get("reference"),s["email"])
             except (ValueError,TypeError) as e: return self.send_json({"error":str(e)},400)
             return self.send_json({"ok":True},201)
         if path=="/api/crypto/wallets":
-            s=self.require("write")
+            s=self.require("manage")
             if not s: return
             try: add_crypto_wallet(p.get("label"),p.get("network"),p.get("address"),s["email"])
             except ValueError as e: return self.send_json({"error":str(e)},400)
             return self.send_json({"ok":True},201)
         if path=="/api/crypto/transactions":
-            s=self.require("write")
+            s=self.require("manage")
             if not s: return
             try: record_crypto_transaction(p.get("wallet_id"),p.get("direction"),p.get("amount"),p.get("tx_hash"),p.get("note"),s["email"])
             except (ValueError,TypeError) as e: return self.send_json({"error":str(e)},400)
