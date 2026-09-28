@@ -1715,6 +1715,9 @@ class Handler(BaseHTTPRequestHandler):
             if not s: return
             items=list_notifications(s["email"])
             return self.send_json({"notifications":items,"unread":sum(1 for x in items if not x.get("read_at"))})
+        if path=="/favicon.ico":
+            svg=b'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><rect width="64" height="64" rx="14" fill="#2563eb"/><text x="32" y="45" text-anchor="middle" font-size="38" font-family="Arial" fill="white">S</text></svg>'
+            self.send_response(200); self.send_header("Content-Type","image/svg+xml"); self.send_header("Content-Length",str(len(svg))); self.send_header("Cache-Control","public, max-age=86400"); self.end_headers(); self.wfile.write(svg); return
         if path in ("/","/index.html"):
             f=BASE/"web"/"index.html"; b=f.read_bytes()
             self.send_response(200); self.send_header("Content-Type","text/html; charset=utf-8"); self.send_header("Content-Length",str(len(b))); self.send_header("Cache-Control","no-store"); self.send_header("X-Content-Type-Options","nosniff"); self.send_header("X-Frame-Options","DENY"); self.send_header("Referrer-Policy","no-referrer"); self.send_header("Permissions-Policy","geolocation=(), camera=(), microphone=()");
