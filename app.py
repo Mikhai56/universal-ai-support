@@ -303,7 +303,7 @@ def ai_answer(question, company_id=None):
     context=json.dumps(tenant_kb_context(company_id) if company_id is not None else KB,ensure_ascii=False)
 
     payload={"model":AI_MODEL,"temperature":.2,"messages":[
-      {"role":"system","content":"Ты SupportPilot — оператор поддержки интернет-магазина. Отвечай только на основе базы знаний. Не выдумывай цены, сроки, наличие, статусы заказов или правила. Если данных нет — скажи, что нужен менеджер. Никогда не проси пароль, CVV или полные реквизиты карты. Отвечай кратко и по-русски.\nБАЗА ЗНАНИЙ:\n"+context},
+      {"role":"system","content":"Ты SupportPilot — оператор поддержки интернет-магазина. Отвечай только на основе базы знаний. Не выдумывай цены, сроки, наличие, статусы заказов или правила. Если данных в базе недостаточно для точного ответа, начни ответ строго с ESCALATE: и кратко укажи причину. Никогда не проси пароль, CVV или полные реквизиты карты. Отвечай кратко и по-русски.\nБАЗА ЗНАНИЙ:\n"+context},
       {"role":"user","content":question}]}
     req=urllib.request.Request(AI_BASE_URL+"/chat/completions",data=json.dumps(payload,ensure_ascii=False).encode(),
       headers={"Content-Type":"application/json","Authorization":f"Bearer {AI_API_KEY}"},method="POST")
@@ -368,14 +368,21 @@ def answer_question(question, name="", email="", conversation_id="", company_id=
         return {"answer":answer,"status":"escalated","ticket_id":ticket_id,"conversation_id":conversation_id,"source":source}
     ai=ai_answer(question,company_id)
     if ai:
+        if ai.strip().upper().startswith("ESCALATE:"):
+            reason_text=ai.split(":",1)[1].strip() or "AI не смог дать подтверждённый ответ"
+            public_answer="Я передал обращение специалисту, чтобы не дать неточный ответ. Менеджер продолжит работу с вашим обращением."
+            ticket_id=create_ticket(question,public_answer,"needs_clarification",reason_text,name,email,company_id=company_id)
+            save_message(conversation_id,"assistant",public_answer,"escalated",ticket_id)
+            return {"answer":public_answer,"status":"escalated","ticket_id":ticket_id,"conversation_id":conversation_id,"source":"AI escalation"}
         save_message(conversation_id,"assistant",ai,"answered")
         return {"answer":ai,"status":"answered","conversation_id":conversation_id,"source":source or "AI"}
     if answer:
         save_message(conversation_id,"assistant",answer,"answered")
         return {"answer":answer,"status":"answered","conversation_id":conversation_id,"source":source}
-    clarification="Я не нашёл точного ответа в базе знаний. Уточните вопрос или передайте обращение менеджеру."
-    save_message(conversation_id,"assistant",clarification,"needs_clarification")
-    return {"answer":clarification,"status":"needs_clarification","conversation_id":conversation_id}
+    clarification="Я не нашёл точного ответа в базе знаний. Я передал обращение менеджеру, чтобы дать вам точную информацию."
+    ticket_id=create_ticket(question,clarification,"needs_clarification","недостаточно данных",name,email,company_id=company_id)
+    save_message(conversation_id,"assistant",clarification,"needs_clarification",ticket_id)
+    return {"answer":clarification,"status":"needs_clarification","ticket_id":ticket_id,"conversation_id":conversation_id}
 
 def list_tickets(status=None, priority=None, search=None, assignee=None, unassigned=False, limit=100, company_id=None):
     if status is not None and status not in TICKET_STATUSES: raise ValueError("invalid ticket status")
@@ -449,6 +456,24 @@ def update_ticket(tid, fields, actor="system", company_id=None):
         if after.get("assignee"): create_notification("assignment","Вам назначено обращение",f"Обращение #{tid}",tid,str(after["assignee"]).strip().lower(),conn=conn)
         if after.get("status") in ("escalated","open"): create_notification("ticket","Обновлено обращение",f"Обращение #{tid}: статус {after.get('status')}",tid,conn=conn)
     conn.commit(); conn.close(); return True
+
+def add_ticket_reply(tid, message, actor="operator", company_id=None):
+    message=redact_sensitive(str(message or "").strip())[:MAX_MESSAGE_CHARS]
+    if not message: raise ValueError("reply message is required")
+    ticket=get_ticket(tid,company_id=company_id)
+    if not ticket: return False
+    conn=db(); pg=is_pg(conn); p="%s" if pg else "?"
+    scope=(" AND company_id="+p) if company_id is not None else ""
+    vals=[message,tid]
+    vals.extend([str(company_id)] if company_id is not None else [])
+    conn.execute("UPDATE tickets SET answer="+p+", status='answered', updated_at="+("NOW()" if pg else "datetime('now')")+" WHERE id="+p+scope,tuple(vals))
+    details=json.dumps({"message":message},ensure_ascii=False)
+    if pg:
+        conn.execute("INSERT INTO ticket_events(ticket_id,company_id,actor,action,details) VALUES(%s,%s,%s,%s,%s)",(tid,company_id,str(actor)[:160],"ticket.reply",details))
+    else:
+        conn.execute("INSERT INTO ticket_events(ticket_id,company_id,actor,action,details,created_at) VALUES(?,?,?,?,?,datetime('now'))",(tid,company_id,str(actor)[:160],"ticket.reply",details))
+    conn.commit(); conn.close()
+    return True
 
 def list_ticket_events(tid, limit=100, company_id=None):
     limit=min(max(int(limit),1),100); conn=db(); p="%s" if is_pg(conn) else "?"
@@ -1787,6 +1812,18 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json({"ok":True,"ticket_id":tid},201)
             except Exception:
                 return self.send_json({"error":"telegram ticket sync failed"},500)
+        if path.startswith("/api/tickets/") and path.endswith("/reply"):
+            company=company_from_request(self)
+            if not company: return self.send_json({"error":"commercial authentication required"},401)
+            if not require_company_permission(self,company,"write"): return
+            try:
+                tid=int(path.split("/")[3])
+                body=self.body()
+                ok=add_ticket_reply(tid,body.get("message"),actor=company.get("member_email") or company["owner_email"],company_id=company["id"])
+                return self.send_json({"ok":bool(ok)},200 if ok else 404)
+            except (ValueError,TypeError) as e:
+                return self.send_json({"error":str(e)},400)
+
         if path=="/api/setup-admin":
             email=str(p.get("email","")).strip().lower()
             password=str(p.get("password",""))
