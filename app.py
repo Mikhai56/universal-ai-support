@@ -3,7 +3,7 @@
 import hashlib, html, hmac, json, os, re, secrets, sqlite3, time, urllib.request, urllib.error
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, urlparse, quote
+from urllib.parse import parse_qs, urlparse, quote, urlencode
 
 BASE = Path(__file__).resolve().parent
 HOST = os.getenv("HOST", "0.0.0.0")
@@ -1448,30 +1448,76 @@ def accept_company_invitation(token,password):
     finally:
         conn.close()
 
+def send_email(to,subject,text,html_body=None):
+    """Send transactional email through Resend when configured."""
+    api_key=os.getenv("RESEND_API_KEY","").strip()
+    from_email=os.getenv("EMAIL_FROM","").strip()
+    if not api_key or not from_email:
+        return False
+    payload={"from":from_email,"to":[str(to).strip().lower()],"subject":str(subject)[:200],"text":str(text)[:100000]}
+    if html_body: payload["html"]=str(html_body)[:200000]
+    req=urllib.request.Request("https://api.resend.com/emails",data=json.dumps(payload,ensure_ascii=False).encode("utf-8"),
+        headers={"Authorization":"Bearer "+api_key,"Content-Type":"application/json"},method="POST")
+    try:
+        with urllib.request.urlopen(req,timeout=20) as response:
+            data=json.loads(response.read().decode("utf-8") or "{}")
+        return bool(data.get("id"))
+    except Exception as exc:
+        print(f"email delivery failed: {exc}",flush=True)
+        raise RuntimeError("email delivery failed") from exc
+
+def stripe_create_checkout(company_id,plan):
+    """Create a real Stripe Checkout subscription session."""
+    secret=os.getenv("STRIPE_SECRET_KEY","").strip()
+    price=os.getenv("STRIPE_PRICE_"+str(plan).upper(),"").strip()
+    if not secret or not price: return ""
+    public_url=os.getenv("SUPPORTPILOT_PUBLIC_URL","").strip().rstrip("/")
+    if not public_url:
+        domain=os.getenv("RAILWAY_PUBLIC_DOMAIN","").strip()
+        if domain: public_url="https://"+domain
+    if not public_url: raise ValueError("SUPPORTPILOT_PUBLIC_URL is required for Stripe Checkout")
+    form={
+        "mode":"subscription","line_items[0][price]":price,"line_items[0][quantity]":"1",
+        "client_reference_id":str(company_id),"metadata[company_id]":str(company_id),"metadata[plan]":str(plan),
+        "subscription_data[metadata][company_id]":str(company_id),"subscription_data[metadata][plan]":str(plan),
+        "success_url":public_url+"/account?billing=success","cancel_url":public_url+"/account?billing=cancel"}
+    import base64
+    req=urllib.request.Request("https://api.stripe.com/v1/checkout/sessions",data=urlencode(form).encode("utf-8"),
+        headers={"Authorization":"Basic "+base64.b64encode((secret+":").encode()).decode(),"Content-Type":"application/x-www-form-urlencoded"},method="POST")
+    try:
+        with urllib.request.urlopen(req,timeout=25) as response:
+            data=json.loads(response.read().decode("utf-8"))
+    except Exception as exc:
+        print(f"stripe checkout creation failed: {exc}",flush=True)
+        raise ValueError("Не удалось создать Stripe Checkout") from exc
+    url=str(data.get("url") or "").strip()
+    if not url: raise ValueError("Stripe не вернул ссылку оплаты")
+    return url
+
 def commercial_subscribe(company_id,plan):
     if plan not in PLANS or plan=="free": raise ValueError("Недоступный тариф")
     env_key="STRIPE_CHECKOUT_"+plan.upper()+"_URL"
     checkout=os.getenv(env_key,"").strip()
+    dynamic=bool(os.getenv("STRIPE_SECRET_KEY","").strip() and os.getenv("STRIPE_PRICE_"+str(plan).upper(),"").strip())
     conn=db(); p="%s" if is_pg(conn) else "?"
     current=conn.execute("SELECT plan FROM companies WHERE id="+p,(company_id,)).fetchone()
     if not current:
         conn.close(); raise ValueError("Компания не найдена")
-    # Never grant paid limits before Stripe confirms payment/subscription.
     now_expr="NOW()" if is_pg(conn) else "datetime('now')"
+    provider="stripe" if (checkout or dynamic) else "internal"
     if is_pg(conn):
-        conn.execute("INSERT INTO company_subscriptions(company_id,plan,status,provider,current_period_end) VALUES(%s,%s,%s,%s,NULL)",
-                     (company_id,plan,"pending","stripe" if checkout else "internal"))
+        conn.execute("INSERT INTO company_subscriptions(company_id,plan,status,provider,current_period_end) VALUES(%s,%s,%s,%s,NULL)",(company_id,plan,"pending",provider))
     else:
         now=time.strftime("%Y-%m-%d %H:%M:%S")
-        conn.execute("INSERT INTO company_subscriptions(company_id,plan,status,provider,current_period_end,created_at,updated_at) VALUES(?,?,?,?,?,?,?)",
-                     (company_id,plan,"pending","stripe" if checkout else "internal",None,now,now))
+        conn.execute("INSERT INTO company_subscriptions(company_id,plan,status,provider,current_period_end,created_at,updated_at) VALUES(?,?,?,?,?,?,?)",(company_id,plan,"pending",provider,None,now,now))
     conn.execute("UPDATE companies SET subscription_status='pending', updated_at="+now_expr+" WHERE id="+p,(company_id,))
     conn.commit(); conn.close()
-    if checkout:
+    if dynamic:
+        checkout=stripe_create_checkout(company_id,plan)
+    elif checkout:
         sep="&" if "?" in checkout else "?"
         checkout=checkout+sep+"client_reference_id="+quote(str(company_id),safe="")
     return checkout
-
 def stripe_signature_valid(payload, signature, secret):
     if not signature or not secret: return False
     try:
@@ -1627,10 +1673,21 @@ def commercial_post(handler,path):
         c=company_from_request(handler)
         if not require_company_permission(handler,c,"manage"): return
         try:
-            p=handler.body(); token=create_company_invitation(c,p.get("email"),p.get("role","operator"))
+            p=handler.body(); invite_email=str(p.get("email","")).strip().lower(); invite_role=p.get("role","operator")
+            token=create_company_invitation(c,invite_email,invite_role)
             host=handler.headers.get("Host","")
             scheme="https" if (SECURE_COOKIES or handler.headers.get("X-Forwarded-Proto")=="https" or host.endswith(".up.railway.app")) else "http"
-            return handler.send_json({"ok":True,"email":str(p.get("email","")).strip().lower(),"role":p.get("role","operator"),"invite_url":scheme+"://"+host+"/invite?token="+token},201)
+            invite_url=scheme+"://"+host+"/invite?token="+token
+            email_sent=False
+            email_error=None
+            if os.getenv("RESEND_API_KEY","").strip() and os.getenv("EMAIL_FROM","").strip():
+                try:
+                    email_sent=send_email(invite_email,"Приглашение в SupportPilot",
+                        f"Вас пригласили в компанию {c.get('name','SupportPilot')}. Откройте ссылку: {invite_url}",
+                        "<p>Вас пригласили в компанию <b>"+html.escape(c.get("name","SupportPilot"))+"</b>.</p><p><a href='"+html.escape(invite_url,quote=True)+"'>Принять приглашение</a></p><p>Ссылка действительна 7 дней.</p>")
+                except RuntimeError as exc:
+                    email_error=str(exc)
+            return handler.send_json({"ok":True,"email":invite_email,"role":invite_role,"invite_url":invite_url,"email_sent":email_sent,"email_error":email_error},201)
         except ValueError as e: return handler.send_json({"error":str(e)},400)
     if path=="/api/commercial/invitations/accept":
         try:
