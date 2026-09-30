@@ -147,7 +147,7 @@ def handle(message):
             return send(chat_id,f"🧑‍💼 {html.escape(answer)}"+(f"\n\nНомер обращения: <b>#{data.get('ticket_id')}</b>" if data.get("ticket_id") else ""))
         except Exception as error:
             print(f"Telegram bridge failed: {error}",flush=True)
-            return escalate(chat_id,username,"Клиент запросил оператора","запрос клиента")
+            return send(chat_id,"Этот Telegram-чат ещё не подключён к компании SupportPilot. Владелец должен указать его chat ID в кабинете.")
     try:
         data=bridge_chat(chat_id,username,text)
         answer=safe_text(data.get("answer","")).strip()
