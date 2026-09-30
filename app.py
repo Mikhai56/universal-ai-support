@@ -660,6 +660,8 @@ def init_finance_db(conn):
           created_by TEXT NOT NULL, created_at TEXT NOT NULL,
           CHECK (direction IN ('in','out')))""")
 
+    _finance_tenant_migrations(conn)
+
 def list_money_accounts(company_id=None):
     from decimal import Decimal
     conn=db(); pg=is_pg(conn); p="%s" if pg else "?"
