@@ -3,7 +3,7 @@
 import hashlib, html, hmac, json, os, re, secrets, sqlite3, time, urllib.request, urllib.error
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, urlparse, quote
 
 BASE = Path(__file__).resolve().parent
 HOST = os.getenv("HOST", "0.0.0.0")
@@ -29,7 +29,7 @@ def validate_password(password):
         raise ValueError("password must include uppercase, lowercase, and a digit")
     return password
 SESSION_COOKIE_NAME = "sp_session"
-SECURE_COOKIES = os.getenv("SECURE_COOKIES", "0").strip().lower() in {"1", "true", "yes", "on"}
+SECURE_COOKIES = os.getenv("SECURE_COOKIES", "1").strip().lower() in {"1", "true", "yes", "on"}
 
 def session_cookie(token, max_age=TOKEN_TTL):
     secure = "; Secure" if SECURE_COOKIES else ""
@@ -1310,7 +1310,8 @@ def add_company_member(company_id,email,role="operator"):
 
 def update_company_member(company_id,member_id,fields):
     allowed={"role","status"}; fields={k:v for k,v in (fields or {}).items() if k in allowed}
-    if "role" in fields and fields["role"] not in {"owner","admin","operator","viewer"}: raise ValueError("Недопустимая роль")
+    if "role" in fields and fields["role"] not in {"admin","operator","viewer"}:
+        raise ValueError("Владельца нельзя назначить через управление участниками")
     if "status" in fields and fields["status"] not in {"active","disabled"}: raise ValueError("Недопустимый статус")
     if not fields: return False
     conn=db(); pg=is_pg(conn); p="%s" if pg else "?"
@@ -1413,14 +1414,23 @@ def commercial_subscribe(company_id,plan):
     env_key="STRIPE_CHECKOUT_"+plan.upper()+"_URL"
     checkout=os.getenv(env_key,"").strip()
     conn=db(); p="%s" if is_pg(conn) else "?"
+    current=conn.execute("SELECT plan FROM companies WHERE id="+p,(company_id,)).fetchone()
+    if not current:
+        conn.close(); raise ValueError("Компания не найдена")
+    # Never grant paid limits before Stripe confirms payment/subscription.
     now_expr="NOW()" if is_pg(conn) else "datetime('now')"
-    conn.execute("UPDATE companies SET plan="+p+", subscription_status='pending', updated_at="+now_expr+" WHERE id="+p,(plan,company_id))
     if is_pg(conn):
-        conn.execute("INSERT INTO company_subscriptions(company_id,plan,status,provider) VALUES(%s,%s,%s,%s)",(company_id,plan,"pending","stripe" if checkout else "internal"))
+        conn.execute("INSERT INTO company_subscriptions(company_id,plan,status,provider,current_period_end) VALUES(%s,%s,%s,%s,NULL)",
+                     (company_id,plan,"pending","stripe" if checkout else "internal"))
     else:
         now=time.strftime("%Y-%m-%d %H:%M:%S")
-        conn.execute("INSERT INTO company_subscriptions(company_id,plan,status,provider,created_at,updated_at) VALUES(?,?,?,?,?,?)",(company_id,plan,"pending","stripe" if checkout else "internal",now,now))
+        conn.execute("INSERT INTO company_subscriptions(company_id,plan,status,provider,current_period_end,created_at,updated_at) VALUES(?,?,?,?,?,?,?)",
+                     (company_id,plan,"pending","stripe" if checkout else "internal",None,now,now))
+    conn.execute("UPDATE companies SET subscription_status='pending', updated_at="+now_expr+" WHERE id="+p,(company_id,))
     conn.commit(); conn.close()
+    if checkout:
+        sep="&" if "?" in checkout else "?"
+        checkout=checkout+sep+"client_reference_id="+quote(str(company_id),safe="")
     return checkout
 
 def stripe_signature_valid(payload, signature, secret):
@@ -1442,7 +1452,7 @@ def stripe_apply_event(event):
     typ=str(event.get("type",""))
     obj=(event.get("data") or {}).get("object") or {}
     metadata=obj.get("metadata") or {}
-    company_id=str(metadata.get("company_id") or "").strip()
+    company_id=str(metadata.get("company_id") or obj.get("client_reference_id") or "").strip()
     plan=str(metadata.get("plan") or "").strip().lower()
     if not company_id and obj.get("customer"):
         conn=db(); p="%s" if is_pg(conn) else "?"
@@ -1450,6 +1460,11 @@ def stripe_apply_event(event):
         found=conn.execute(q,(str(obj.get("customer")),)).fetchone(); conn.close()
         if found: company_id=str(found["company_id"]); plan=plan or str(found["plan"])
     if not company_id: return False
+    if not plan:
+        conn=db(); p="%s" if is_pg(conn) else "?"
+        pending=conn.execute("SELECT plan FROM company_subscriptions WHERE company_id="+p+" AND status='pending' ORDER BY id DESC LIMIT 1",(company_id,)).fetchone()
+        conn.close()
+        if pending: plan=str(pending["plan"] or "").lower()
     if typ=="checkout.session.completed":
         sub_id=obj.get("subscription"); customer_id=obj.get("customer")
         if not plan and obj.get("line_items") is None: plan=metadata.get("plan","")
@@ -1475,10 +1490,16 @@ def stripe_apply_event(event):
         new_status="active" if active else ("canceled" if status in {"canceled","unpaid","incomplete_expired"} else status or "pending")
         if pg:
             conn.execute("UPDATE company_subscriptions SET status=%s,updated_at=NOW() WHERE provider_subscription_id=%s",(new_status,sub_id))
-            conn.execute("UPDATE companies SET subscription_status=%s,updated_at=NOW() WHERE id=%s",(new_status,company_id))
+            if active:
+                conn.execute("UPDATE companies SET plan=%s,subscription_status=%s,updated_at=NOW() WHERE id=%s",(plan,new_status,company_id))
+            else:
+                conn.execute("UPDATE companies SET plan='free',subscription_status=%s,updated_at=NOW() WHERE id=%s",(new_status,company_id))
         else:
             conn.execute("UPDATE company_subscriptions SET status=?,updated_at=datetime('now') WHERE provider_subscription_id=?",(new_status,sub_id))
-            conn.execute("UPDATE companies SET subscription_status=?,updated_at=datetime('now') WHERE id=?",(new_status,company_id))
+            if active:
+                conn.execute("UPDATE companies SET plan=?,subscription_status=?,updated_at=datetime('now') WHERE id=?",(plan,new_status,company_id))
+            else:
+                conn.execute("UPDATE companies SET plan='free',subscription_status=?,updated_at=datetime('now') WHERE id=?",(new_status,company_id))
         conn.commit(); conn.close(); return True
     return False
 
@@ -1836,6 +1857,9 @@ class Handler(BaseHTTPRequestHandler):
         if commercial_post(self,path): return
         try: p=self.body()
         except ValueError as e: return self.send_json({"error":str(e)},413 if "large" in str(e) else 400)
+        if path=="/api/webhooks/stripe":
+            return handle_stripe_webhook(self)
+
         if path=="/api/internal/telegram/tickets":
             supplied=(self.headers.get("Authorization") or "").replace("Bearer ","").strip()
             if not SUPPORTPILOT_INTERNAL_TOKEN or not hmac.compare_digest(supplied,SUPPORTPILOT_INTERNAL_TOKEN):
