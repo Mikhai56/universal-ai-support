@@ -1596,14 +1596,14 @@ def commercial_post(handler,path):
         return handler.send_json({"ok":True})
     if path=="/api/commercial/subscribe":
         c=company_from_request(handler)
-        if not c: return handler.send_json({"error":"authentication required"},401)
+        if not require_company_permission(handler,c,"manage"): return
         try:
             p=handler.body(); plan=str(p.get("plan","")).lower(); checkout=commercial_subscribe(c["id"],plan)
             return handler.send_json({"ok":True,"plan":plan,"checkout_url":checkout or None,"message":"Откройте оплату Stripe, когда она подключена."})
         except ValueError as e: return handler.send_json({"error":str(e)},400)
     if path=="/api/commercial/members":
         c=company_from_request(handler)
-        if not c: return handler.send_json({"error":"authentication required"},401)
+        if not require_company_permission(handler,c,"manage"): return
         try:
             p=handler.body(); add_company_member(c["id"],p.get("email"),p.get("role","operator"))
             return handler.send_json({"ok":True,"members":list_company_members(c["id"])},201)
@@ -1783,16 +1783,34 @@ class Handler(BaseHTTPRequestHandler):
             if not self.require(): return
             return self.send_json(stats())
         if path=="/api/finance/accounts":
+            company=company_from_request(self)
+            if company:
+                if not require_company_permission(self,company,"read"): return
+                return self.send_json({"accounts":list_money_accounts(company["id"]),"transactions":list_money_transactions(company_id=company["id"])})
             if not self.require("manage"): return
             return self.send_json({"accounts":list_money_accounts(),"transactions":list_money_transactions()})
         if path=="/api/finance/transactions":
+            company=company_from_request(self)
+            if company:
+                if not require_company_permission(self,company,"read"): return
+                account_id=parse_qs(urlparse(self.path).query).get("account_id",[None])[0]
+                return self.send_json({"transactions":list_money_transactions(account_id,company_id=company["id"])})
             if not self.require("manage"): return
             account_id=parse_qs(urlparse(self.path).query).get("account_id",[None])[0]
             return self.send_json({"transactions":list_money_transactions(account_id)})
         if path=="/api/crypto/wallets":
+            company=company_from_request(self)
+            if company:
+                if not require_company_permission(self,company,"read"): return
+                return self.send_json({"wallets":crypto_wallet_balances(company["id"]),"transactions":list_crypto_transactions(company_id=company["id"])})
             if not self.require("manage"): return
             return self.send_json({"wallets":crypto_wallet_balances(),"transactions":list_crypto_transactions()})
         if path=="/api/crypto/transactions":
+            company=company_from_request(self)
+            if company:
+                if not require_company_permission(self,company,"read"): return
+                wallet_id=parse_qs(urlparse(self.path).query).get("wallet_id",[None])[0]
+                return self.send_json({"transactions":list_crypto_transactions(wallet_id,company_id=company["id"])})
             if not self.require("manage"): return
             wallet_id=parse_qs(urlparse(self.path).query).get("wallet_id",[None])[0]
             return self.send_json({"transactions":list_crypto_transactions(wallet_id)})
