@@ -1392,14 +1392,21 @@ def commercial_subscribe(company_id,plan):
     if plan not in PLANS or plan=="free": raise ValueError("Недоступный тариф")
     env_key="STRIPE_CHECKOUT_"+plan.upper()+"_URL"
     checkout=os.getenv(env_key,"").strip()
+    if not checkout:
+        raise ValueError("Оплата для выбранного тарифа ещё не подключена")
     conn=db(); p="%s" if is_pg(conn) else "?"
+    current=conn.execute("SELECT plan,subscription_status FROM companies WHERE id="+p,(company_id,)).fetchone()
+    if not current:
+        conn.close(); raise ValueError("Компания не найдена")
+    # Paid access is activated only after the payment provider confirms payment.
     now_expr="NOW()" if is_pg(conn) else "datetime('now')"
-    conn.execute("UPDATE companies SET plan="+p+", subscription_status='pending', updated_at="+now_expr+" WHERE id="+p,(plan,company_id))
     if is_pg(conn):
-        conn.execute("INSERT INTO company_subscriptions(company_id,plan,status,provider) VALUES(%s,%s,%s,%s)",(company_id,plan,"pending","stripe" if checkout else "internal"))
+        conn.execute("INSERT INTO company_subscriptions(company_id,plan,status,provider) VALUES(%s,%s,%s,%s)",(company_id,plan,"pending","stripe"))
+        conn.execute("UPDATE companies SET subscription_status='pending',updated_at="+now_expr+" WHERE id=%s",(company_id,))
     else:
         now=time.strftime("%Y-%m-%d %H:%M:%S")
-        conn.execute("INSERT INTO company_subscriptions(company_id,plan,status,provider,created_at,updated_at) VALUES(?,?,?,?,?,?)",(company_id,plan,"pending","stripe" if checkout else "internal",now,now))
+        conn.execute("INSERT INTO company_subscriptions(company_id,plan,status,provider,created_at,updated_at) VALUES(?,?,?,?,?,?)",(company_id,plan,"pending","stripe",now,now))
+        conn.execute("UPDATE companies SET subscription_status='pending',updated_at=datetime('now') WHERE id=?",(company_id,))
     conn.commit(); conn.close()
     return checkout
 
@@ -1572,18 +1579,24 @@ def commercial_post(handler,path):
             return handler.send_json({"ok":True,"company":{"id":c["id"],"name":c["name"],"slug":c["slug"],"plan":c["plan"],"subscription_status":c["subscription_status"]}})
         except ValueError as e: return handler.send_json({"ok":False,"error":str(e)},401)
     if path=="/api/commercial/logout":
+        token=handler.commercial_session_token()
+        if token:
+            conn=db(); p="%s" if is_pg(conn) else "?"
+            conn.execute("DELETE FROM company_sessions WHERE token="+p,(token,)); conn.commit(); conn.close()
         handler._clear_commercial_cookie=True
         return handler.send_json({"ok":True})
     if path=="/api/commercial/subscribe":
         c=company_from_request(handler)
         if not c: return handler.send_json({"error":"authentication required"},401)
+        if not require_company_permission(handler,c,"manage"): return
         try:
             p=handler.body(); plan=str(p.get("plan","")).lower(); checkout=commercial_subscribe(c["id"],plan)
-            return handler.send_json({"ok":True,"plan":plan,"checkout_url":checkout or None,"message":"Откройте оплату Stripe, когда она подключена."})
+            return handler.send_json({"ok":True,"plan":plan,"checkout_url":checkout,"message":"Откройте оплату Stripe."})
         except ValueError as e: return handler.send_json({"error":str(e)},400)
     if path=="/api/commercial/members":
         c=company_from_request(handler)
         if not c: return handler.send_json({"error":"authentication required"},401)
+        if not require_company_permission(handler,c,"manage"): return
         try:
             p=handler.body(); add_company_member(c["id"],p.get("email"),p.get("role","operator"))
             return handler.send_json({"ok":True,"members":list_company_members(c["id"])},201)
@@ -1639,6 +1652,14 @@ class Handler(BaseHTTPRequestHandler):
         elif getattr(self,"_set_session_cookie",""):
             self.send_header("Set-Cookie",session_cookie(self._set_session_cookie))
         self.end_headers(); self.wfile.write(body)
+    def commercial_session_token(self):
+        raw=self.headers.get("Cookie","")
+        for part in raw.split(";"):
+            part=part.strip()
+            if part.startswith(COMMERCIAL_SESSION_COOKIE+"="):
+                return part.split("=",1)[1]
+        return ""
+
     def body(self):
         n=int(self.headers.get("Content-Length","0"))
         if n>1_000_000: raise ValueError("request too large")
