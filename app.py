@@ -598,6 +598,16 @@ def get_customer_detail(identifier="", company_id=None):
         "last_interaction": max(all_dates, key=str) if all_dates else None
     }
 
+def _finance_tenant_migrations(conn):
+    pg=is_pg(conn)
+    for table in ("money_accounts","money_transactions","crypto_wallets","crypto_transactions"):
+        if pg:
+            conn.execute("ALTER TABLE "+table+" ADD COLUMN IF NOT EXISTS company_id TEXT")
+        else:
+            cols={r["name"] for r in conn.execute("PRAGMA table_info("+table+")").fetchall()}
+            if "company_id" not in cols: conn.execute("ALTER TABLE "+table+" ADD COLUMN company_id TEXT")
+    conn.commit()
+
 def _money_amount(value):
     from decimal import Decimal, InvalidOperation
     try:
@@ -650,13 +660,15 @@ def init_finance_db(conn):
           created_by TEXT NOT NULL, created_at TEXT NOT NULL,
           CHECK (direction IN ('in','out')))""")
 
-def list_money_accounts():
+def list_money_accounts(company_id=None):
     from decimal import Decimal
-    conn=db(); pg=is_pg(conn); rs=conn.execute("SELECT * FROM money_accounts ORDER BY id").fetchall()
+    conn=db(); pg=is_pg(conn); p="%s" if pg else "?"
+    q="SELECT * FROM money_accounts"+((" WHERE company_id="+p) if company_id is not None else "")+" ORDER BY id"
+    rs=conn.execute(q,((str(company_id),) if company_id is not None else ())).fetchall()
     result=[]
     for a in rs:
         p="%s" if pg else "?"
-        txs=conn.execute("SELECT kind,amount FROM money_transactions WHERE account_id="+p,(a["id"],)).fetchall()
+        txs=conn.execute("SELECT kind,amount FROM money_transactions WHERE account_id="+p+" AND company_id="+p,(a["id"],str(company_id))).fetchall()
         balance=Decimal("0")
         for t in txs:
             value=Decimal(str(t["amount"]))
@@ -664,44 +676,46 @@ def list_money_accounts():
         item=row(a); item["balance"]=format(balance,".6f"); result.append(item)
     conn.close(); return result
 
-def create_money_account(name,currency="EUR"):
+def create_money_account(name,currency="EUR",company_id=None):
     name=str(name or "").strip()[:120]
     currency=str(currency or "").strip().upper()[:12]
     if not name or not re.fullmatch(r"[A-Z0-9]{3,12}",currency): raise ValueError("invalid account or currency")
     conn=db(); pg=is_pg(conn); p="%s" if pg else "?"
+    if company_id is None: raise ValueError("company_id required")
     try:
         if pg:
-            conn.execute("INSERT INTO money_accounts(name,currency) VALUES(%s,%s)",(name,currency))
+            conn.execute("INSERT INTO money_accounts(company_id,name,currency) VALUES(%s,%s,%s)",(str(company_id),name,currency))
         else:
-            conn.execute("INSERT INTO money_accounts(name,currency,created_at) VALUES(?,?,datetime('now'))",(name,currency))
+            conn.execute("INSERT INTO money_accounts(company_id,name,currency,created_at) VALUES(?,?,?,datetime('now'))",(str(company_id),name,currency))
         conn.commit()
     except Exception as exc:
         conn.close(); raise ValueError("account already exists") from exc
     conn.close(); return True
 
-def record_money_transaction(account_id,kind,amount,description="",reference="",created_by="system"):
+def record_money_transaction(account_id,kind,amount,description="",reference="",created_by="system",company_id=None):
     if kind not in {"credit","debit"}: raise ValueError("invalid transaction type")
     amount=_money_amount(amount); description=str(description or "").strip()[:500]; reference=str(reference or "").strip()[:160]
     conn=db(); pg=is_pg(conn); p="%s" if pg else "?"
-    account=conn.execute("SELECT id FROM money_accounts WHERE id="+p,(int(account_id),)).fetchone()
+    account=conn.execute("SELECT id FROM money_accounts WHERE id="+p+" AND company_id="+p,(int(account_id),str(company_id))).fetchone()
     if not account: conn.close(); raise ValueError("account not found")
     if kind=="debit":
         from decimal import Decimal
-        txs=conn.execute("SELECT kind,amount FROM money_transactions WHERE account_id="+p,(int(account_id),)).fetchall()
+        txs=conn.execute("SELECT kind,amount FROM money_transactions WHERE account_id="+p+" AND company_id="+p,(int(account_id),str(company_id))).fetchall()
         balance=sum((Decimal(str(t["amount"])) if t["kind"]=="credit" else -Decimal(str(t["amount"])) for t in txs),Decimal("0"))
         if balance < Decimal(amount): conn.close(); raise ValueError("insufficient account balance")
     if pg:
-        conn.execute("INSERT INTO money_transactions(account_id,kind,amount,description,reference,created_by) VALUES(%s,%s,%s,%s,%s,%s)",(int(account_id),kind,amount,description or None,reference or None,created_by))
+        conn.execute("INSERT INTO money_transactions(company_id,account_id,kind,amount,description,reference,created_by) VALUES(%s,%s,%s,%s,%s,%s,%s)",(str(company_id),int(account_id),kind,amount,description or None,reference or None,created_by))
     else:
-        conn.execute("INSERT INTO money_transactions(account_id,kind,amount,description,reference,created_by,created_at) VALUES(?,?,?,?,?,?,datetime('now'))",(int(account_id),kind,amount,description or None,reference or None,created_by))
+        conn.execute("INSERT INTO money_transactions(company_id,account_id,kind,amount,description,reference,created_by,created_at) VALUES(?,?,?,?,?,?,?,datetime('now'))",(str(company_id),int(account_id),kind,amount,description or None,reference or None,created_by))
     conn.commit(); conn.close(); return True
 
-def list_money_transactions(account_id=None,limit=100):
+def list_money_transactions(account_id=None,limit=100,company_id=None):
     limit=min(max(int(limit),1),100); conn=db(); pg=is_pg(conn); p="%s" if pg else "?"
-    if account_id:
-        rs=conn.execute(f"SELECT * FROM money_transactions WHERE account_id={p} ORDER BY id DESC LIMIT {limit}",(int(account_id),)).fetchall()
-    else:
-        rs=conn.execute(f"SELECT * FROM money_transactions ORDER BY id DESC LIMIT {limit}").fetchall()
+    clauses=[]; params=[]
+    if company_id is not None: clauses.append("company_id="+p); params.append(str(company_id))
+    if account_id: clauses.append("account_id="+p); params.append(int(account_id))
+    where=(" WHERE "+" AND ".join(clauses)) if clauses else ""
+    rs=conn.execute(f"SELECT * FROM money_transactions{where} ORDER BY id DESC LIMIT {limit}",tuple(params)).fetchall()
     conn.close(); return [row(x) for x in rs]
 
 def _wallet_address_ok(network,address):
@@ -712,46 +726,50 @@ def _wallet_address_ok(network,address):
         return bool(re.fullmatch(r"T[1-9A-HJ-NP-Za-km-z]{33}",address))
     raise ValueError("unsupported network; use ethereum, bsc or tron")
 
-def list_crypto_wallets():
-    conn=db(); rs=conn.execute("SELECT * FROM crypto_wallets ORDER BY id DESC").fetchall(); conn.close(); return [row(x) for x in rs]
+def list_crypto_wallets(company_id=None):
+    conn=db(); pg=is_pg(conn); p="%s" if pg else "?"
+    q="SELECT * FROM crypto_wallets"+((" WHERE company_id="+p) if company_id is not None else "")+" ORDER BY id DESC"
+    rs=conn.execute(q,((str(company_id),) if company_id is not None else ())).fetchall(); conn.close(); return [row(x) for x in rs]
 
-def add_crypto_wallet(label,network,address,created_by):
+def add_crypto_wallet(label,network,address,created_by,company_id=None):
     label=str(label or "").strip()[:120]; network=str(network or "").strip().lower(); address=str(address or "").strip()
     if not label: raise ValueError("wallet label is required")
     if network not in {"ethereum","bsc","tron"}: raise ValueError("unsupported network")
     if not _wallet_address_ok(network,address): raise ValueError("invalid wallet address")
     conn=db(); pg=is_pg(conn)
+    if company_id is None: raise ValueError("company_id required")
     try:
-        if pg: conn.execute("INSERT INTO crypto_wallets(label,network,address,created_by) VALUES(%s,%s,%s,%s)",(label,network,address,created_by))
-        else: conn.execute("INSERT INTO crypto_wallets(label,network,address,created_by,created_at) VALUES(?,?,?,?,datetime('now'))",(label,network,address,created_by))
+        if pg: conn.execute("INSERT INTO crypto_wallets(company_id,label,network,address,created_by) VALUES(%s,%s,%s,%s,%s)",(str(company_id),label,network,address,created_by))
+        else: conn.execute("INSERT INTO crypto_wallets(company_id,label,network,address,created_by,created_at) VALUES(?,?,?,?,?,datetime('now'))",(str(company_id),label,network,address,created_by))
         conn.commit()
     except Exception as exc:
         conn.close(); raise ValueError("wallet already exists") from exc
     conn.close(); return True
 
-def list_crypto_transactions(wallet_id=None,limit=100):
+def list_crypto_transactions(wallet_id=None,limit=100,company_id=None):
     limit=min(max(int(limit),1),100); conn=db(); pg=is_pg(conn); p="%s" if pg else "?"
-    if wallet_id:
-        rs=conn.execute(f"SELECT * FROM crypto_transactions WHERE wallet_id={p} ORDER BY id DESC LIMIT {limit}",(int(wallet_id),)).fetchall()
-    else:
-        rs=conn.execute(f"SELECT * FROM crypto_transactions ORDER BY id DESC LIMIT {limit}").fetchall()
+    clauses=[]; params=[]
+    if company_id is not None: clauses.append("company_id="+p); params.append(str(company_id))
+    if wallet_id: clauses.append("wallet_id="+p); params.append(int(wallet_id))
+    where=(" WHERE "+" AND ".join(clauses)) if clauses else ""
+    rs=conn.execute(f"SELECT * FROM crypto_transactions{where} ORDER BY id DESC LIMIT {limit}",tuple(params)).fetchall()
     conn.close(); return [row(x) for x in rs]
 
-def record_crypto_transaction(wallet_id,direction,amount,tx_hash="",note="",created_by="system"):
+def record_crypto_transaction(wallet_id,direction,amount,tx_hash="",note="",created_by="system",company_id=None):
     if direction not in {"in","out"}: raise ValueError("invalid crypto direction")
     amount=_money_amount(amount); tx_hash=str(tx_hash or "").strip()[:128]; note=str(note or "").strip()[:500]
     conn=db(); pg=is_pg(conn); p="%s" if pg else "?"
-    wallet=conn.execute("SELECT id FROM crypto_wallets WHERE id="+p,(int(wallet_id),)).fetchone()
+    wallet=conn.execute("SELECT id FROM crypto_wallets WHERE id="+p+" AND company_id="+p,(int(wallet_id),str(company_id))).fetchone()
     if not wallet: conn.close(); raise ValueError("wallet not found")
-    if pg: conn.execute("INSERT INTO crypto_transactions(wallet_id,direction,asset,amount,tx_hash,note,created_by) VALUES(%s,%s,'USDT',%s,%s,%s,%s)",(int(wallet_id),direction,amount,tx_hash or None,note or None,created_by))
-    else: conn.execute("INSERT INTO crypto_transactions(wallet_id,direction,asset,amount,tx_hash,note,created_by,created_at) VALUES(?,?,?,?,?,?,?,datetime('now'))",(int(wallet_id),direction,"USDT",amount,tx_hash or None,note or None,created_by))
+    if pg: conn.execute("INSERT INTO crypto_transactions(company_id,wallet_id,direction,asset,amount,tx_hash,note,created_by) VALUES(%s,%s,%s,'USDT',%s,%s,%s,%s,%s)",(str(company_id),int(wallet_id),direction,amount,tx_hash or None,note or None,created_by))
+    else: conn.execute("INSERT INTO crypto_transactions(company_id,wallet_id,direction,asset,amount,tx_hash,note,created_by,created_at) VALUES(?,?,?,?,?,?,?,?,datetime('now'))",(str(company_id),int(wallet_id),direction,"USDT",amount,tx_hash or None,note or None,created_by))
     conn.commit(); conn.close(); return True
 
-def crypto_wallet_balances():
+def crypto_wallet_balances(company_id=None):
     from decimal import Decimal
-    wallets=list_crypto_wallets()
+    wallets=list_crypto_wallets(company_id)
     for w in wallets:
-        txs=list_crypto_transactions(w["id"])
+        txs=list_crypto_transactions(w["id"],company_id=company_id)
         balance=sum((Decimal(str(t["amount"])) if t["direction"]=="in" else -Decimal(str(t["amount"])) for t in txs),Decimal("0"))
         w["balance"]=format(balance,".6f")
     return wallets
