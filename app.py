@@ -578,7 +578,7 @@ def get_customer_detail(identifier="", company_id=None):
             conv_rows=conn.execute(f"SELECT * FROM conversations WHERE company_id={p} AND lower(customer_name)={p} ORDER BY updated_at DESC LIMIT 30",(str(company_id),ident)).fetchall()
         for c in conv_rows:
             cr=row(c)
-            msgs=conn.execute(f"SELECT * FROM messages WHERE conversation_id={p} ORDER BY id ASC LIMIT 100",(cr['id'],)).fetchall()
+            msgs=conn.execute(f"SELECT m.* FROM messages m JOIN conversations c ON c.id=m.conversation_id WHERE m.conversation_id={p} AND c.company_id={p} ORDER BY m.id ASC LIMIT 100",(cr['id'],str(company_id))).fetchall()
             cr["messages"]=[row(x) for x in msgs]
             conversations.append(cr)
     except Exception:
@@ -613,6 +613,35 @@ def _finance_tenant_migrations(conn):
         else:
             cols={r["name"] for r in conn.execute("PRAGMA table_info("+table+")").fetchall()}
             if "company_id" not in cols: conn.execute("ALTER TABLE "+table+" ADD COLUMN company_id TEXT")
+    if pg:
+        # Replace legacy global uniqueness with tenant-scoped uniqueness.
+        conn.execute("ALTER TABLE money_accounts DROP CONSTRAINT IF EXISTS money_accounts_name_currency_key")
+        conn.execute("ALTER TABLE crypto_wallets DROP CONSTRAINT IF EXISTS crypto_wallets_network_address_asset_key")
+        conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_money_accounts_company_name_currency ON money_accounts(company_id,name,currency) WHERE company_id IS NOT NULL")
+        conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_crypto_wallets_company_network_address_asset ON crypto_wallets(company_id,network,address,asset) WHERE company_id IS NOT NULL")
+    else:
+        # SQLite cannot drop inline UNIQUE constraints, so rebuild only legacy schemas.
+        for table, marker, ddl, columns in (
+            ("money_accounts","UNIQUE(name,currency)",
+             """CREATE TABLE money_accounts_new(
+               id INTEGER PRIMARY KEY AUTOINCREMENT, company_id TEXT, name TEXT NOT NULL, currency TEXT NOT NULL,
+               created_at TEXT NOT NULL, UNIQUE(company_id,name,currency))""",
+             "id,company_id,name,currency,created_at"),
+            ("crypto_wallets","UNIQUE(network,address,asset)",
+             """CREATE TABLE crypto_wallets_new(
+               id INTEGER PRIMARY KEY AUTOINCREMENT, company_id TEXT, label TEXT NOT NULL, network TEXT NOT NULL,
+               address TEXT NOT NULL, asset TEXT NOT NULL DEFAULT 'USDT',
+               created_by TEXT NOT NULL, created_at TEXT NOT NULL,
+               UNIQUE(company_id,network,address,asset))""",
+             "id,company_id,label,network,address,asset,created_by,created_at"),
+        ):
+            schema=conn.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name=?",(table,)).fetchone()
+            if schema and marker in (schema["sql"] or ""):
+                conn.execute("ALTER TABLE "+table+" RENAME TO "+table+"_legacy")
+                conn.execute(ddl)
+                conn.execute("INSERT INTO "+table+"_new("+columns+") SELECT "+columns+" FROM "+table+"_legacy")
+                conn.execute("DROP TABLE "+table+"_legacy")
+                conn.execute("ALTER TABLE "+table+"_new RENAME TO "+table)
     conn.commit()
 
 def _money_amount(value):
@@ -629,7 +658,7 @@ def init_finance_db(conn):
     if is_pg(conn):
         conn.execute("""CREATE TABLE IF NOT EXISTS money_accounts(
           id BIGSERIAL PRIMARY KEY, name TEXT NOT NULL, currency TEXT NOT NULL,
-          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), UNIQUE(name,currency))""")
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), UNIQUE(company_id,name,currency))""")
         conn.execute("""CREATE TABLE IF NOT EXISTS money_transactions(
           id BIGSERIAL PRIMARY KEY, account_id BIGINT NOT NULL, kind TEXT NOT NULL,
           amount TEXT NOT NULL, description TEXT, reference TEXT,
@@ -639,7 +668,7 @@ def init_finance_db(conn):
           id BIGSERIAL PRIMARY KEY, label TEXT NOT NULL, network TEXT NOT NULL,
           address TEXT NOT NULL, asset TEXT NOT NULL DEFAULT 'USDT',
           created_by TEXT NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-          UNIQUE(network,address,asset))""")
+          UNIQUE(company_id,network,address,asset))""")
         conn.execute("""CREATE TABLE IF NOT EXISTS crypto_transactions(
           id BIGSERIAL PRIMARY KEY, wallet_id BIGINT NOT NULL, tx_hash TEXT,
           direction TEXT NOT NULL, asset TEXT NOT NULL, amount TEXT NOT NULL,
@@ -649,7 +678,7 @@ def init_finance_db(conn):
     else:
         conn.execute("""CREATE TABLE IF NOT EXISTS money_accounts(
           id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, currency TEXT NOT NULL,
-          created_at TEXT NOT NULL, UNIQUE(name,currency))""")
+          created_at TEXT NOT NULL, UNIQUE(company_id,name,currency))""")
         conn.execute("""CREATE TABLE IF NOT EXISTS money_transactions(
           id INTEGER PRIMARY KEY AUTOINCREMENT, account_id INTEGER NOT NULL, kind TEXT NOT NULL,
           amount TEXT NOT NULL, description TEXT, reference TEXT,
@@ -659,7 +688,7 @@ def init_finance_db(conn):
           id INTEGER PRIMARY KEY AUTOINCREMENT, label TEXT NOT NULL, network TEXT NOT NULL,
           address TEXT NOT NULL, asset TEXT NOT NULL DEFAULT 'USDT',
           created_by TEXT NOT NULL, created_at TEXT NOT NULL,
-          UNIQUE(network,address,asset))""")
+          UNIQUE(company_id,network,address,asset))""")
         conn.execute("""CREATE TABLE IF NOT EXISTS crypto_transactions(
           id INTEGER PRIMARY KEY AUTOINCREMENT, wallet_id INTEGER NOT NULL, tx_hash TEXT,
           direction TEXT NOT NULL, asset TEXT NOT NULL, amount TEXT NOT NULL,
@@ -1149,7 +1178,7 @@ def request_password_reset(email):
         conn.commit()
         base=os.getenv("SUPPORTPILOT_PUBLIC_URL","").strip().rstrip("/") or ("https://"+os.getenv("RAILWAY_PUBLIC_DOMAIN","").strip().rstrip("/") if os.getenv("RAILWAY_PUBLIC_DOMAIN","").strip() else "")
         if base and os.getenv("RESEND_API_KEY","").strip() and os.getenv("EMAIL_FROM","").strip():
-            link=base+"/reset-password?token="+urlencode({"token":token})[6:]
+            link=base+"/reset-password?token="+quote(token,safe="")
             send_email(email,"SupportPilot — восстановление пароля",f"Ссылка для восстановления пароля: {link}\\n\\nСрок действия — 1 час.",f"<p>Запрос на восстановление пароля для <b>{html.escape(str(company['name']))}</b>.</p><p><a href='{html.escape(link,quote=True)}'>Восстановить пароль</a></p><p>Ссылка действует 1 час.</p>")
         return True
     finally:
@@ -2084,9 +2113,16 @@ class Handler(BaseHTTPRequestHandler):
                 ans=redact_sensitive(str(p.get("answer","")).strip())[:MAX_MESSAGE_CHARS]
                 status=str(p.get("status","open"))
                 reason=str(p.get("reason","telegram"))
-                if not q or not ans: return self.send_json({"error":"question and answer are required"},400)
-                tid=create_ticket(q,ans,status,reason,str(p.get("customer_name","")),str(p.get("customer_email","")),None)
-                return self.send_json({"ok":True,"ticket_id":tid},201)
+                chat_id=str(p.get("chat_id","")).strip()
+                if not q or not ans or not chat_id: return self.send_json({"error":"question, answer and chat_id are required"},400)
+                conn=db()
+                rs=conn.execute("SELECT company_id,config_json FROM company_channels WHERE channel_type='telegram' AND status='active'").fetchall()
+                conn.close()
+                matches=[str(x["company_id"]) for x in rs if str(_channel_config(x["config_json"]).get("telegram_chat_id","")).strip()==chat_id]
+                if len(matches)!=1: return self.send_json({"error":"Telegram chat is not connected to exactly one active company channel"},404)
+                company_id=matches[0]
+                tid=create_ticket(q,ans,status,reason,str(p.get("customer_name","")),str(p.get("customer_email","")),company_id=company_id)
+                return self.send_json({"ok":True,"company_id":company_id,"ticket_id":tid},201)
             except Exception:
                 return self.send_json({"error":"telegram ticket sync failed"},500)
         if path.startswith("/api/tickets/") and path.endswith("/reply"):
