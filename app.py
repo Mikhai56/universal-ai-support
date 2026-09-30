@@ -1914,7 +1914,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         self._set_session_cookie=""
         path=urlparse(self.path).path
-        if path != "/api/webhooks/stripe" and path not in ("/api/login","/api/setup-admin","/api/chat","/api/leads","/api/commercial/register","/api/commercial/login","/api/commercial/logout","/api/commercial/invitations/accept","/api/internal/telegram/tickets,/api/internal/telegram/chat") and not self._require_csrf():
+        if path != "/api/webhooks/stripe" and path not in ("/api/login","/api/setup-admin","/api/chat","/api/leads","/api/commercial/register","/api/commercial/login","/api/commercial/logout","/api/commercial/invitations/accept","/api/internal/telegram/tickets","/api/internal/telegram/chat") and not self._require_csrf():
             return
         if commercial_post(self,path): return
         try: p=self.body()
