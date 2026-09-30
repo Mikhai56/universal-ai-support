@@ -890,7 +890,8 @@ def update_operator_profile(email,fields):
         vals.append(str(email or "").lower())
         conn.execute("UPDATE operators SET "+",".join(sets)+" WHERE lower(email)=lower("+p+")",tuple(vals))
         conn.commit()
-        return get_operator_profile(email)
+        rs=conn.execute("SELECT email,role,display_name,phone,timezone,created_at FROM operators WHERE lower(email)=lower("+p+")",(str(email or ""),)).fetchone()
+        return row(rs) if rs else None
     finally: conn.close()
 
 def change_operator_password(email,old_password,new_password):
