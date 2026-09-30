@@ -1392,14 +1392,21 @@ def commercial_subscribe(company_id,plan):
     if plan not in PLANS or plan=="free": raise ValueError("Недоступный тариф")
     env_key="STRIPE_CHECKOUT_"+plan.upper()+"_URL"
     checkout=os.getenv(env_key,"").strip()
+    if not checkout:
+        raise ValueError("Оплата для выбранного тарифа ещё не подключена")
     conn=db(); p="%s" if is_pg(conn) else "?"
+    current=conn.execute("SELECT plan,subscription_status FROM companies WHERE id="+p,(company_id,)).fetchone()
+    if not current:
+        conn.close(); raise ValueError("Компания не найдена")
+    # Paid access is activated only after the payment provider confirms payment.
     now_expr="NOW()" if is_pg(conn) else "datetime('now')"
-    conn.execute("UPDATE companies SET plan="+p+", subscription_status='pending', updated_at="+now_expr+" WHERE id="+p,(plan,company_id))
     if is_pg(conn):
-        conn.execute("INSERT INTO company_subscriptions(company_id,plan,status,provider) VALUES(%s,%s,%s,%s)",(company_id,plan,"pending","stripe" if checkout else "internal"))
+        conn.execute("INSERT INTO company_subscriptions(company_id,plan,status,provider) VALUES(%s,%s,%s,%s)",(company_id,plan,"pending","stripe"))
+        conn.execute("UPDATE companies SET subscription_status='pending',updated_at="+now_expr+" WHERE id=%s",(company_id,))
     else:
         now=time.strftime("%Y-%m-%d %H:%M:%S")
-        conn.execute("INSERT INTO company_subscriptions(company_id,plan,status,provider,created_at,updated_at) VALUES(?,?,?,?,?,?)",(company_id,plan,"pending","stripe" if checkout else "internal",now,now))
+        conn.execute("INSERT INTO company_subscriptions(company_id,plan,status,provider,created_at,updated_at) VALUES(?,?,?,?,?,?)",(company_id,plan,"pending","stripe",now,now))
+        conn.execute("UPDATE companies SET subscription_status='pending',updated_at=datetime('now') WHERE id=?",(company_id,))
     conn.commit(); conn.close()
     return checkout
 
