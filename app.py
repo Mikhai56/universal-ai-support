@@ -1940,24 +1940,48 @@ class Handler(BaseHTTPRequestHandler):
             except ValueError as e: return self.send_json({"error":str(e)},400)
             return self.send_json({"ok":True},201)
         if path=="/api/finance/accounts":
+            company=company_from_request(self)
+            if company:
+                if not require_company_permission(self,company,"manage"): return
+                try: create_money_account(p.get("name"),p.get("currency","EUR"),company_id=company["id"])
+                except ValueError as e: return self.send_json({"error":str(e)},400)
+                return self.send_json({"ok":True},201)
             s=self.require("manage")
             if not s: return
             try: create_money_account(p.get("name"),p.get("currency","EUR"))
             except ValueError as e: return self.send_json({"error":str(e)},400)
             return self.send_json({"ok":True},201)
         if path=="/api/finance/transactions":
+            company=company_from_request(self)
+            if company:
+                if not require_company_permission(self,company,"manage"): return
+                try: record_money_transaction(p.get("account_id"),p.get("kind"),p.get("amount"),p.get("description"),p.get("reference"),company.get("member_email") or company["owner_email"],company_id=company["id"])
+                except (ValueError,TypeError) as e: return self.send_json({"error":str(e)},400)
+                return self.send_json({"ok":True},201)
             s=self.require("manage")
             if not s: return
             try: record_money_transaction(p.get("account_id"),p.get("kind"),p.get("amount"),p.get("description"),p.get("reference"),s["email"])
             except (ValueError,TypeError) as e: return self.send_json({"error":str(e)},400)
             return self.send_json({"ok":True},201)
         if path=="/api/crypto/wallets":
+            company=company_from_request(self)
+            if company:
+                if not require_company_permission(self,company,"manage"): return
+                try: add_crypto_wallet(p.get("label"),p.get("network"),p.get("address"),company.get("member_email") or company["owner_email"],company_id=company["id"])
+                except ValueError as e: return self.send_json({"error":str(e)},400)
+                return self.send_json({"ok":True},201)
             s=self.require("manage")
             if not s: return
             try: add_crypto_wallet(p.get("label"),p.get("network"),p.get("address"),s["email"])
             except ValueError as e: return self.send_json({"error":str(e)},400)
             return self.send_json({"ok":True},201)
         if path=="/api/crypto/transactions":
+            company=company_from_request(self)
+            if company:
+                if not require_company_permission(self,company,"manage"): return
+                try: record_crypto_transaction(p.get("wallet_id"),p.get("direction"),p.get("amount"),p.get("tx_hash"),p.get("note"),company.get("member_email") or company["owner_email"],company_id=company["id"])
+                except (ValueError,TypeError) as e: return self.send_json({"error":str(e)},400)
+                return self.send_json({"ok":True},201)
             s=self.require("manage")
             if not s: return
             try: record_crypto_transaction(p.get("wallet_id"),p.get("direction"),p.get("amount"),p.get("tx_hash"),p.get("note"),s["email"])
