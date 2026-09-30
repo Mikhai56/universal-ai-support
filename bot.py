@@ -91,21 +91,21 @@ def risky(question):
         if any(p in normalized for p in phrases): return reason
     return None
 
-def sync_web_ticket(question,answer,status,reason,username=""):
-    if not WEB_URL or not INTERNAL_TOKEN: return
-    try:
-        payload={"question":safe_text(question),"answer":safe_text(answer),"status":status,"reason":reason or "telegram","customer_name":username}
-        req=urllib.request.Request(WEB_URL+"/api/internal/telegram/tickets",data=json.dumps(payload,ensure_ascii=False).encode(),headers={"Content-Type":"application/json","Authorization":"Bearer "+INTERNAL_TOKEN})
-        with urllib.request.urlopen(req,timeout=5) as response:
-            if response.status >= 300: raise RuntimeError(f"HTTP {response.status}")
-    except Exception as error:
-        print(f"Web ticket sync failed: {error}",flush=True)
+def bridge_chat(chat_id,username,question):
+    if not WEB_URL or not INTERNAL_TOKEN:
+        return None
+    payload={"chat_id":str(chat_id),"name":safe_text(username)[:120],"message":safe_text(question)}
+    req=urllib.request.Request(WEB_URL+"/api/internal/telegram/chat",data=json.dumps(payload,ensure_ascii=False).encode(),headers={"Content-Type":"application/json","Authorization":"Bearer "+INTERNAL_TOKEN})
+    with urllib.request.urlopen(req,timeout=30) as response:
+        data=json.loads(response.read().decode())
+    if response.status >= 300 or not data.get("ok"):
+        raise RuntimeError(data.get("error","telegram bridge failed"))
+    return data
 
 def create_ticket(chat_id,username,question,answer,status,reason):
     question=safe_text(question); username=safe_text(username)[:64]; answer=safe_text(answer)
     conn=db(); cur=conn.execute("INSERT INTO tickets(chat_id,username,question,answer,status,reason,created_at) VALUES(?,?,?,?,?,?,?)",(str(chat_id),username,question,answer,status,reason,now()))
     ticket_id=cur.lastrowid; conn.commit(); conn.close()
-    sync_web_ticket(question,answer,status,reason,username)
     return ticket_id
 
 def escalate(chat_id,username,question,reason,public_answer=None):
@@ -133,24 +133,32 @@ def handle(message):
     if not text: return send(chat_id,"Пока я понимаю только текстовые сообщения.")
     if text=="/start": return send(chat_id,"Здравствуйте! Я — SupportPilot. Отвечу на типовые вопросы о «Юнити96», а сложный случай передам специалисту.\n\nНапишите вопрос одним сообщением.")
     if text in ("/help","/privacy"): return send(chat_id,f"Не отправляйте пароли, данные банковской карты и документы. Обращения хранятся не более {RETENTION_DAYS} дней. Для связи со специалистом: /operator")
+    if text=="/chatid": return send(chat_id,f"ID этого Telegram-чата: <code>{html.escape(str(chat_id))}</code>")
     is_admin=bool(ADMIN_CHAT_ID) and str(chat_id)==str(ADMIN_CHAT_ID)
     if is_admin and text=="/queue": return show_queue(chat_id)
     if is_admin and text.startswith("/resolve_"):
         try: return resolve(chat_id,int(text.split("_",1)[1]))
         except ValueError: return send(chat_id,"Неверный номер тикета.")
     if rate_limited(chat_id): return send(chat_id,"Слишком много сообщений. Подождите немного и повторите.")
-    if text=="/operator": return escalate(chat_id,username,"Клиент запросил оператора","запрос клиента")
-    reason=risky(text)
-    if reason: return escalate(chat_id,username,text,reason)
-    answer,topic,must_escalate,source=local_answer(text)
-    if answer and must_escalate: return escalate(chat_id,username,text,topic,answer)
-    if not answer:
-        answer="Я пока не нашёл точного ответа. Уточните вопрос или выберите тему: ассортимент, доставка, сборка, оплата, возврат, гарантия, контакты или статус заказа."
-        ticket_id=create_ticket(chat_id,username,text,answer,"needs_clarification","недостаточно данных")
-        return send(chat_id,f"🤔 {answer}\n\n<i>Обращение #{ticket_id}</i>")
-    ticket_id=create_ticket(chat_id,username,text,answer,"answered",topic)
-    source_line=f"\nИсточник: {html.escape(source)}" if source and source.startswith("http") else ""
-    send(chat_id,f"🤖 {html.escape(answer)}{source_line}\n\n<i>Обращение #{ticket_id} · если ответ не помог, отправьте /operator</i>")
+    if text=="/operator":
+        try:
+            data=bridge_chat(chat_id,username,"Клиент запросил оператора")
+            answer=data.get("answer","Обращение передано специалисту.")
+            return send(chat_id,f"🧑‍💼 {html.escape(answer)}"+(f"\n\nНомер обращения: <b>#{data.get('ticket_id')}</b>" if data.get("ticket_id") else ""))
+        except Exception as error:
+            print(f"Telegram bridge failed: {error}",flush=True)
+            return escalate(chat_id,username,"Клиент запросил оператора","запрос клиента")
+    try:
+        data=bridge_chat(chat_id,username,text)
+        answer=safe_text(data.get("answer","")).strip()
+        if not answer: raise RuntimeError("empty answer")
+        prefix="🤖"
+        if data.get("status") in ("escalated","needs_clarification"): prefix="🧑‍💼"
+        suffix=f"\n\n<i>Обращение #{data.get('ticket_id')}</i>" if data.get("ticket_id") else ""
+        return send(chat_id,f"{prefix} {html.escape(answer)}{suffix}")
+    except Exception as error:
+        print(f"Telegram bridge failed: {error}",flush=True)
+        return send(chat_id,"Не удалось связаться с SupportPilot. Попробуйте ещё раз через несколько секунд.")
 
 def run():
     if not TOKEN: raise SystemExit("Set TELEGRAM_BOT_TOKEN")
