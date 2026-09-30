@@ -233,6 +233,13 @@ def init_db():
         conn.execute("""CREATE TABLE IF NOT EXISTS notifications(
           id INTEGER PRIMARY KEY AUTOINCREMENT, recipient TEXT, kind TEXT NOT NULL, title TEXT NOT NULL,
           body TEXT, ticket_id INTEGER, created_at TEXT NOT NULL, read_at TEXT)""")
+    if is_pg(conn):
+        conn.execute("ALTER TABLE notifications ADD COLUMN IF NOT EXISTS company_id TEXT")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_notifications_company_id ON notifications(company_id)")
+    else:
+        nc={r["name"] for r in conn.execute("PRAGMA table_info(notifications)").fetchall()}
+        if "company_id" not in nc: conn.execute("ALTER TABLE notifications ADD COLUMN company_id TEXT")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_notifications_company_id ON notifications(company_id)")
     seed_operators(conn)
     init_finance_db(conn)
     from lead_pipeline import init_leads
@@ -294,7 +301,7 @@ def create_ticket(question,answer,status,reason="",customer_name="",customer_ema
     else:
         conn.execute("INSERT INTO ticket_events(ticket_id,company_id,actor,action,details,created_at) VALUES(?,?,?,?,?,datetime('now'))",(tid,company_id,"system","ticket.created",json.dumps({"status":status,"reason":reason or ""},ensure_ascii=False)))
     if status in ("escalated","needs_clarification"):
-        create_notification("ticket","Новое обращение требует внимания",f"Обращение #{tid}: {reason or status}",tid,conn=conn)
+        create_notification("ticket","Новое обращение требует внимания",f"Обращение #{tid}: {reason or status}",tid,company_id=company_id,conn=conn)
     conn.commit(); conn.close(); return tid
 
 def ai_answer(question, company_id=None):
@@ -793,7 +800,7 @@ def stats(company_id=None):
     messages=scalar("SELECT COUNT(*) AS n FROM messages"+(" WHERE conversation_id IN (SELECT id FROM conversations WHERE company_id="+p+")" if company_id is not None else ""),vals_t)
     operators=scalar("SELECT COUNT(*) AS n FROM company_members WHERE company_id="+p+" AND status='active'",(str(company_id),)) if company_id is not None else scalar("SELECT COUNT(*) AS n FROM operators")
     unassigned=scalar("SELECT COUNT(*) AS n FROM tickets WHERE status IN ('escalated','needs_clarification','open') AND (assignee IS NULL OR assignee='')"+(" AND company_id="+p if company_id is not None else ""),vals_t)
-    unread=scalar("SELECT COUNT(*) AS n FROM notifications WHERE read_at IS NULL")
+    unread=scalar("SELECT COUNT(*) AS n FROM notifications WHERE read_at IS NULL AND company_id="+p,(str(company_id),)) if company_id is not None else scalar("SELECT COUNT(*) AS n FROM notifications WHERE read_at IS NULL AND company_id IS NULL")
     try: leads=scalar("SELECT COUNT(*) AS n FROM leads"+(" WHERE company_id="+p if company_id is not None else ""),vals_t)
     except Exception: leads=0
     conn.close()
@@ -801,7 +808,7 @@ def stats(company_id=None):
             "resolved":resolved,"conversations":conversations,"messages":messages,
             "operators":operators,"unassigned":unassigned,"leads":leads,"unread_notifications":unread}
 
-def create_notification(kind,title,body="",ticket_id=None,recipient=None,conn=None):
+def create_notification(kind,title,body="",ticket_id=None,recipient=None,company_id=None,conn=None):
     """Create a notification. Broadcasts are materialized per operator so read state is private."""
     own=conn is None
     if own: conn=db()
@@ -814,21 +821,26 @@ def create_notification(kind,title,body="",ticket_id=None,recipient=None,conn=No
         recipients=[None]
     for target in recipients:
         if pg:
-            conn.execute("INSERT INTO notifications(recipient,kind,title,body,ticket_id) VALUES(%s,%s,%s,%s,%s)",(target,kind,str(title)[:200],str(body)[:2000],ticket_id))
+            conn.execute("INSERT INTO notifications(recipient,company_id,kind,title,body,ticket_id) VALUES(%s,%s,%s,%s,%s,%s)",(target,str(company_id) if company_id else None,kind,str(title)[:200],str(body)[:2000],ticket_id))
         else:
-            conn.execute("INSERT INTO notifications(recipient,kind,title,body,ticket_id,created_at) VALUES(?,?,?,?,?,datetime('now'))",(target,kind,str(title)[:200],str(body)[:2000],ticket_id))
+            conn.execute("INSERT INTO notifications(recipient,company_id,kind,title,body,ticket_id,created_at) VALUES(?,?,?,?,?,?,datetime('now'))",(target,str(company_id) if company_id else None,kind,str(title)[:200],str(body)[:2000],ticket_id))
     if own: conn.commit(); conn.close()
 
-def list_notifications(recipient,limit=50):
+def list_notifications(recipient,limit=50,company_id=None):
     recipient=str(recipient or "").strip().lower()
     limit=min(max(int(limit),1),100); conn=db(); pg=is_pg(conn); p="%s" if pg else "?"
-    rs=conn.execute(f"SELECT * FROM notifications WHERE recipient={p} ORDER BY id DESC LIMIT {limit}",(recipient,)).fetchall()
+    if company_id is None:
+        rs=conn.execute(f"SELECT * FROM notifications WHERE recipient={p} AND company_id IS NULL ORDER BY id DESC LIMIT {limit}",(recipient,)).fetchall()
+    else:
+        rs=conn.execute(f"SELECT * FROM notifications WHERE recipient={p} AND company_id={p} ORDER BY id DESC LIMIT {limit}",(recipient,str(company_id))).fetchall()
     conn.close(); return [row(x) for x in rs]
 
-def mark_notification_read(notification_id,recipient):
+def mark_notification_read(notification_id,recipient,company_id=None):
     recipient=str(recipient or "").strip().lower()
     conn=db(); pg=is_pg(conn); p="%s" if pg else "?"
-    rs=conn.execute("UPDATE notifications SET read_at="+("NOW()" if pg else "datetime('now')")+" WHERE id="+p+" AND recipient="+p,(notification_id,recipient))
+    scope=" AND company_id="+p if company_id is not None else " AND company_id IS NULL"
+    params=(notification_id,recipient,str(company_id)) if company_id is not None else (notification_id,recipient)
+    rs=conn.execute("UPDATE notifications SET read_at="+("NOW()" if pg else "datetime('now')")+" WHERE id="+p+" AND recipient="+p+scope,params)
     conn.commit(); changed=rs.rowcount; conn.close(); return bool(changed)
 
 def get_operator_profile(email):
@@ -1317,7 +1329,7 @@ def update_company_member(company_id,member_id,fields):
     conn=db(); pg=is_pg(conn); p="%s" if pg else "?"
     member=conn.execute("SELECT email,role FROM company_members WHERE id="+p+" AND company_id="+p,(int(member_id),str(company_id))).fetchone()
     if not member: conn.close(); return False
-    if member["role"]=="owner" and fields.get("role")!="owner": conn.close(); raise ValueError("Владельца нельзя разжаловать")
+    if member["role"]=="owner" and (fields.get("role")!="owner" or fields.get("status") is not None): conn.close(); raise ValueError("Владельца нельзя изменить через управление участниками")
     sets=[]; vals=[]
     for k,v in fields.items(): sets.append(k+"="+p); vals.append(v)
     sets.append("updated_at="+("NOW()" if pg else "datetime('now')"))
@@ -1836,6 +1848,12 @@ class Handler(BaseHTTPRequestHandler):
             wallet_id=parse_qs(urlparse(self.path).query).get("wallet_id",[None])[0]
             return self.send_json({"transactions":list_crypto_transactions(wallet_id)})
         if path=="/api/notifications":
+            company=company_from_request(self)
+            if company:
+                if not require_company_permission(self,company,"read"): return
+                recipient=company.get("member_email") or company["owner_email"]
+                items=list_notifications(recipient,company_id=company["id"])
+                return self.send_json({"notifications":items,"unread":sum(1 for x in items if not x.get("read_at"))})
             s=self.require()
             if not s: return
             items=list_notifications(s["email"])
