@@ -1579,18 +1579,24 @@ def commercial_post(handler,path):
             return handler.send_json({"ok":True,"company":{"id":c["id"],"name":c["name"],"slug":c["slug"],"plan":c["plan"],"subscription_status":c["subscription_status"]}})
         except ValueError as e: return handler.send_json({"ok":False,"error":str(e)},401)
     if path=="/api/commercial/logout":
+        token=handler.commercial_session_token()
+        if token:
+            conn=db(); p="%s" if is_pg(conn) else "?"
+            conn.execute("DELETE FROM company_sessions WHERE token="+p,(token,)); conn.commit(); conn.close()
         handler._clear_commercial_cookie=True
         return handler.send_json({"ok":True})
     if path=="/api/commercial/subscribe":
         c=company_from_request(handler)
         if not c: return handler.send_json({"error":"authentication required"},401)
+        if not require_company_permission(handler,c,"manage"): return
         try:
             p=handler.body(); plan=str(p.get("plan","")).lower(); checkout=commercial_subscribe(c["id"],plan)
-            return handler.send_json({"ok":True,"plan":plan,"checkout_url":checkout or None,"message":"Откройте оплату Stripe, когда она подключена."})
+            return handler.send_json({"ok":True,"plan":plan,"checkout_url":checkout,"message":"Откройте оплату Stripe."})
         except ValueError as e: return handler.send_json({"error":str(e)},400)
     if path=="/api/commercial/members":
         c=company_from_request(handler)
         if not c: return handler.send_json({"error":"authentication required"},401)
+        if not require_company_permission(handler,c,"manage"): return
         try:
             p=handler.body(); add_company_member(c["id"],p.get("email"),p.get("role","operator"))
             return handler.send_json({"ok":True,"members":list_company_members(c["id"])},201)
@@ -1646,6 +1652,14 @@ class Handler(BaseHTTPRequestHandler):
         elif getattr(self,"_set_session_cookie",""):
             self.send_header("Set-Cookie",session_cookie(self._set_session_cookie))
         self.end_headers(); self.wfile.write(body)
+    def commercial_session_token(self):
+        raw=self.headers.get("Cookie","")
+        for part in raw.split(";"):
+            part=part.strip()
+            if part.startswith(COMMERCIAL_SESSION_COOKIE+"="):
+                return part.split("=",1)[1]
+        return ""
+
     def body(self):
         n=int(self.headers.get("Content-Length","0"))
         if n>1_000_000: raise ValueError("request too large")
