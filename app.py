@@ -1565,7 +1565,10 @@ def commercial_subscribe(company_id,plan):
     if not current:
         conn.close(); raise ValueError("Компания не найдена")
     now_expr="NOW()" if is_pg(conn) else "datetime('now')"
-    provider="stripe" if (checkout or dynamic) else "internal"
+    if not checkout and not dynamic:
+        conn.close()
+        raise ValueError("Stripe не настроен: добавьте STRIPE_CHECKOUT_<PLAN>_URL или STRIPE_SECRET_KEY + STRIPE_PRICE_<PLAN>")
+    provider="stripe"
     if is_pg(conn):
         conn.execute("INSERT INTO company_subscriptions(company_id,plan,status,provider,current_period_end) VALUES(%s,%s,%s,%s,NULL)",(company_id,plan,"pending",provider))
     else:
