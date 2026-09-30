@@ -1201,12 +1201,26 @@ def tenant_local_answer(question,company_id):
 def tenant_kb_context(company_id):
     return company_kb_items(company_id)
 
+def _channel_config(value):
+    try:
+        data=json.loads(value or "{}") if isinstance(value,str) else (value or {})
+        return data if isinstance(data,dict) else {}
+    except Exception:
+        return {}
+
 def company_channels(company_id):
     conn=db(); p="%s" if is_pg(conn) else "?"
-    rs=conn.execute("SELECT id,company_id,channel_type,name,status,created_at,updated_at FROM company_channels WHERE company_id="+p+" ORDER BY id",(str(company_id),)).fetchall()
-    conn.close(); return [row(x) for x in rs]
+    rs=conn.execute("SELECT id,company_id,channel_type,name,status,config_json,created_at,updated_at FROM company_channels WHERE company_id="+p+" ORDER BY id",(str(company_id),)).fetchall()
+    conn.close()
+    items=[]
+    for x in rs:
+        item=row(x); cfg=_channel_config(item.pop("config_json",None))
+        if item.get("channel_type")=="telegram":
+            item["telegram_chat_id"]=str(cfg.get("telegram_chat_id","")).strip() if cfg.get("telegram_chat_id") is not None else ""
+        items.append(item)
+    return items
 
-def add_company_channel(company_id,channel_type,name,status="active"):
+def add_company_channel(company_id,channel_type,name,status="active",config=None):
     channel_type=str(channel_type or "").strip().lower()
     name=str(name or "").strip()[:120]
     status=str(status or "active").strip().lower()
@@ -1216,33 +1230,46 @@ def add_company_channel(company_id,channel_type,name,status="active"):
     usage=company_usage(company_id)
     active=sum(1 for x in company_channels(company_id) if x.get("status")=="active")
     if usage and active >= usage["channels"]["limit"]: raise ValueError("Лимит каналов текущего тарифа исчерпан")
+    cfg=_channel_config(config)
+    if channel_type=="telegram" and cfg.get("telegram_chat_id") is not None:
+        cfg["telegram_chat_id"]=str(cfg["telegram_chat_id"]).strip()[:80]
     conn=db(); pg=is_pg(conn)
     try:
-        if pg: conn.execute("INSERT INTO company_channels(company_id,channel_type,name,status) VALUES(%s,%s,%s,%s)",(str(company_id),channel_type,name,status))
+        if pg: conn.execute("INSERT INTO company_channels(company_id,channel_type,name,status,config_json) VALUES(%s,%s,%s,%s,%s)",(str(company_id),channel_type,name,status,json.dumps(cfg,ensure_ascii=False)))
         else:
             now=time.strftime("%Y-%m-%d %H:%M:%S")
-            conn.execute("INSERT INTO company_channels(company_id,channel_type,name,status,created_at,updated_at) VALUES(?,?,?,?,?,?)",(str(company_id),channel_type,name,status,now,now))
+            conn.execute("INSERT INTO company_channels(company_id,channel_type,name,status,config_json,created_at,updated_at) VALUES(?,?,?,?,?,?,?)",(str(company_id),channel_type,name,status,json.dumps(cfg,ensure_ascii=False),now,now))
         conn.commit()
     except Exception as exc:
         conn.close(); raise ValueError("Канал с таким названием уже существует") from exc
     conn.close(); return True
 
 def update_company_channel(company_id,channel_id,fields):
-    fields={k:v for k,v in (fields or {}).items() if k in {"name","status"}}
+    fields=dict(fields or {})
+    allowed={"name","status","telegram_chat_id"}
+    fields={k:v for k,v in fields.items() if k in allowed}
     if "name" in fields:
         fields["name"]=str(fields["name"] or "").strip()[:120]
         if not fields["name"]: raise ValueError("Укажите название канала")
     if "status" in fields and fields["status"] not in {"active","disabled"}: raise ValueError("Недопустимый статус")
+    if "telegram_chat_id" in fields:
+        fields["telegram_chat_id"]=str(fields["telegram_chat_id"] or "").strip()[:80]
     if not fields: return False
     conn=db(); pg=is_pg(conn); p="%s" if pg else "?"
-    item=conn.execute("SELECT id,status FROM company_channels WHERE id="+p+" AND company_id="+p,(int(channel_id),str(company_id))).fetchone()
+    item=conn.execute("SELECT id,status,config_json,channel_type FROM company_channels WHERE id="+p+" AND company_id="+p,(int(channel_id),str(company_id))).fetchone()
     if not item: conn.close(); return False
     if fields.get("status")=="active" and item["status"]!="active":
         usage=company_usage(company_id)
         active=sum(1 for x in company_channels(company_id) if x.get("status")=="active")
         if usage and active >= usage["channels"]["limit"]: conn.close(); raise ValueError("Лимит каналов текущего тарифа исчерпан")
+    cfg=_channel_config(item["config_json"])
+    if "telegram_chat_id" in fields:
+        if item["channel_type"]!="telegram": conn.close(); raise ValueError("Telegram chat ID доступен только для Telegram")
+        cfg["telegram_chat_id"]=fields.pop("telegram_chat_id")
     sets=[]; vals=[]
     for k,v in fields.items(): sets.append(k+"="+p); vals.append(v)
+    if "telegram_chat_id" in cfg or item["config_json"] is not None:
+        sets.append("config_json="+p); vals.append(json.dumps(cfg,ensure_ascii=False))
     sets.append("updated_at="+("NOW()" if pg else "datetime('now')"))
     vals.extend([int(channel_id),str(company_id)])
     conn.execute("UPDATE company_channels SET "+", ".join(sets)+" WHERE id="+p+" AND company_id="+p,vals)
@@ -1583,7 +1610,7 @@ def commercial_post(handler,path):
         if not require_company_permission(handler,c,"manage"): return
         try:
             p=handler.body()
-            add_company_channel(c["id"],p.get("channel_type","web"),p.get("name"),p.get("status","active"))
+            add_company_channel(c["id"],p.get("channel_type","web"),p.get("name"),p.get("status","active"),p.get("config"))
             return handler.send_json({"ok":True,"channels":company_channels(c["id"])},201)
         except ValueError as e:
             return handler.send_json({"error":str(e)},400)
@@ -1710,6 +1737,23 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Access-Control-Allow-Headers","Content-Type, Authorization"); self.send_header("Access-Control-Allow-Methods","GET,POST,PATCH,DELETE,OPTIONS"); self.end_headers()
     def do_GET(self):
         path=urlparse(self.path).path
+        if path=="/api/internal/telegram/config":
+            supplied=(self.headers.get("Authorization") or "").replace("Bearer ","").strip()
+            if not SUPPORTPILOT_INTERNAL_TOKEN or not hmac.compare_digest(supplied,SUPPORTPILOT_INTERNAL_TOKEN):
+                return self.send_json({"error":"unauthorized"},401)
+            chat_id=str(parse_qs(urlparse(self.path).query).get("chat_id",[""])[0]).strip()
+            if not chat_id: return self.send_json({"error":"chat_id required"},400)
+            conn=db(); p="%"+"s" if is_pg(conn) else "?"
+            rs=conn.execute("SELECT company_id,config_json FROM company_channels WHERE channel_type='telegram' AND status='active'").fetchall()
+            conn.close()
+            matches=[]
+            for item in rs:
+                cfg=_channel_config(item["config_json"])
+                if str(cfg.get("telegram_chat_id","")).strip()==chat_id:
+                    matches.append({"company_id":item["company_id"]})
+            if len(matches)!=1:
+                return self.send_json({"error":"Telegram chat is not connected to exactly one active company channel"},404)
+            return self.send_json({"ok":True,**matches[0]})
         if commercial_get(self,path): return
         if path=="/api/health":
             conn=None
@@ -1878,6 +1922,25 @@ class Handler(BaseHTTPRequestHandler):
         if path=="/api/webhooks/stripe":
             return handle_stripe_webhook(self)
 
+        if path=="/api/internal/telegram/chat":
+            supplied=(self.headers.get("Authorization") or "").replace("Bearer ","").strip()
+            if not SUPPORTPILOT_INTERNAL_TOKEN or not hmac.compare_digest(supplied,SUPPORTPILOT_INTERNAL_TOKEN):
+                return self.send_json({"error":"unauthorized"},401)
+            try:
+                chat_id=str(p.get("chat_id","")).strip()
+                message=redact_sensitive(str(p.get("message","")).strip())[:MAX_MESSAGE_CHARS]
+                name=redact_sensitive(str(p.get("name","")).strip())[:120]
+                conversation_id=str(p.get("conversation_id","")).strip()
+                if not chat_id or not message: return self.send_json({"error":"chat_id and message are required"},400)
+                conn=db(); rs=conn.execute("SELECT company_id,config_json FROM company_channels WHERE channel_type='telegram' AND status='active'").fetchall(); conn.close()
+                matches=[str(x["company_id"]) for x in rs if str(_channel_config(x["config_json"]).get("telegram_chat_id","")).strip()==chat_id]
+                if len(matches)!=1: return self.send_json({"error":"Telegram chat is not connected to exactly one active company channel"},404)
+                company_id=matches[0]
+                result=answer_question(message,name,"",conversation_id,company_id=company_id)
+                return self.send_json({"ok":True,"company_id":company_id,**result})
+            except Exception as exc:
+                print(f"telegram chat bridge failed: {exc}",flush=True)
+                return self.send_json({"error":"telegram chat bridge failed"},500)
         if path=="/api/internal/telegram/tickets":
             supplied=(self.headers.get("Authorization") or "").replace("Bearer ","").strip()
             if not SUPPORTPILOT_INTERNAL_TOKEN or not hmac.compare_digest(supplied,SUPPORTPILOT_INTERNAL_TOKEN):
