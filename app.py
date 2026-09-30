@@ -1711,6 +1711,23 @@ def commercial_get(handler,path):
         c=company_from_request(handler)
         if not c: return handler.send_json({"authenticated":False},200) or True
         return handler.send_json({"authenticated":True,"company":{"id":c["id"],"name":c["name"],"slug":c["slug"],"email":c.get("member_email") or c["owner_email"],"owner_email":c["owner_email"],"member_id":c.get("member_id"),"member_role":c.get("member_role","owner"),"plan":c["plan"],"subscription_status":c["subscription_status"],"trial_ends_at":c["trial_ends_at"],"status":c["status"]}})
+    if path=="/api/commercial/integrations":
+        c=company_from_request(handler)
+        if not c: return handler.send_json({"error":"authentication required"},401) or True
+        stripe_secret=bool(os.getenv("STRIPE_SECRET_KEY","").strip())
+        stripe_prices=all(bool(os.getenv("STRIPE_PRICE_"+p.upper(),"").strip()) for p in ("starter","business","pro"))
+        stripe_static=all(bool(os.getenv("STRIPE_CHECKOUT_"+p.upper()+"_URL","").strip()) for p in ("starter","business","pro"))
+        resend=bool(os.getenv("RESEND_API_KEY","").strip() and os.getenv("EMAIL_FROM","").strip())
+        telegram_service=bool(os.getenv("TELEGRAM_BOT_TOKEN","").strip() and SUPPORTPILOT_INTERNAL_TOKEN)
+        telegram_channel=any(str(x.get("channel_type"))=="telegram" and str(x.get("status"))=="active" and bool(str(x.get("telegram_chat_id") or "").strip()) for x in company_channels(c["id"]))
+        return handler.send_json({"integrations":{
+            "ai":{"configured":bool(AI_API_KEY),"model":AI_MODEL},
+            "database":{"configured":bool(DATABASE_URL),"type":"postgres" if DATABASE_URL else "sqlite-fallback"},
+            "stripe":{"configured":stripe_secret and stripe_prices or stripe_static,"dynamic_checkout":stripe_secret and stripe_prices,"static_checkout":stripe_static,"webhook":bool(os.getenv("STRIPE_WEBHOOK_SECRET","").strip())},
+            "email":{"configured":resend,"provider":"resend" if resend else None},
+            "telegram":{"service_configured":telegram_service,"company_channel_connected":telegram_channel,"ready":telegram_service and telegram_channel},
+            "public_url":("https://"+os.getenv("RAILWAY_PUBLIC_DOMAIN","").strip()) if os.getenv("RAILWAY_PUBLIC_DOMAIN","").strip() else ""
+        }})
     if path=="/api/commercial/usage":
         c=company_from_request(handler)
         if not c: return handler.send_json({"error":"authentication required"},401) or True
