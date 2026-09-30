@@ -2168,6 +2168,12 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json({"error":"operator update failed"},500)
             return self.send_json({"ok":bool(ok)},200 if ok else 404)
         if path.startswith("/api/notifications/") and path.endswith("/read"):
+            company=company_from_request(self)
+            if company:
+                if not require_company_permission(self,company,"write"): return
+                try: nid=int(path.split("/")[3])
+                except ValueError: return self.send_json({"error":"invalid notification id"},400)
+                return self.send_json({"ok":mark_notification_read(nid,company.get("member_email") or company["owner_email"],company_id=company["id"])})
             s=self.require("write")
             if not s: return
             try: nid=int(path.split("/")[3])
