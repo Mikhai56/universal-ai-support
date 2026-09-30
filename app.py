@@ -1128,7 +1128,7 @@ def commercial_register(name,email,password):
 
 def request_password_reset(email):
     email=str(email or "").strip().lower()
-    if not re.fullmatch(r"[^@\\s]+@[^@\\s]+\\.[^@\\s]+",email):
+    if not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+",email):
         return True
     conn=db(); p="%s" if is_pg(conn) else "?"
     try:
