@@ -995,6 +995,11 @@ def init_commercial_db(conn=None):
           created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), accepted_at TIMESTAMPTZ)""")
         conn.execute("UPDATE company_members SET password_hash=(SELECT password_hash FROM companies c WHERE c.id=company_members.company_id) WHERE role='owner' AND password_hash IS NULL")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_company_invites_company ON company_invitations(company_id,status)")
+        conn.execute("""CREATE TABLE IF NOT EXISTS company_password_resets(
+          id BIGSERIAL PRIMARY KEY, company_id TEXT NOT NULL, email TEXT NOT NULL,
+          token_hash TEXT UNIQUE NOT NULL, expires_at TIMESTAMPTZ NOT NULL,
+          used_at TIMESTAMPTZ, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())""")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_company_resets_token ON company_password_resets(token_hash,status)".replace(",status",""))
     else:
         cols={r["name"] for r in conn.execute("PRAGMA table_info(company_sessions)").fetchall()}
         for col in ("member_id","member_email","member_role"):
@@ -1007,6 +1012,11 @@ def init_commercial_db(conn=None):
           status TEXT NOT NULL DEFAULT 'pending', expires_at TEXT NOT NULL,
           created_at TEXT NOT NULL, accepted_at TEXT)""")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_company_invites_company ON company_invitations(company_id,status)")
+        conn.execute("""CREATE TABLE IF NOT EXISTS company_password_resets(
+          id INTEGER PRIMARY KEY AUTOINCREMENT, company_id TEXT NOT NULL, email TEXT NOT NULL,
+          token_hash TEXT UNIQUE NOT NULL, expires_at TEXT NOT NULL,
+          used_at TEXT, created_at TEXT NOT NULL)""")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_company_resets_token ON company_password_resets(token_hash)")
         conn.execute("UPDATE company_members SET password_hash=(SELECT password_hash FROM companies c WHERE c.id=company_members.company_id) WHERE role='owner' AND password_hash IS NULL")
     if pg:
         conn.execute("""CREATE TABLE IF NOT EXISTS company_kb(
@@ -1115,6 +1125,57 @@ def commercial_register(name,email,password):
     conn.commit()
     conn.close()
     return cid
+
+def request_password_reset(email):
+    email=str(email or "").strip().lower()
+    if not re.fullmatch(r"[^@\\s]+@[^@\\s]+\\.[^@\\s]+",email):
+        return True
+    conn=db(); p="%s" if is_pg(conn) else "?"
+    try:
+        rs=conn.execute("SELECT id FROM company_members WHERE lower(email)=lower("+p+") AND status='active' LIMIT 1",(email,)).fetchone()
+        if not rs: return True
+        company=conn.execute("SELECT id,name FROM companies WHERE lower(owner_email)=lower("+p+") AND status='active' LIMIT 1",(email,)).fetchone()
+        if not company:
+            company=conn.execute("SELECT c.id,c.name FROM company_members m JOIN companies c ON c.id=m.company_id WHERE lower(m.email)=lower("+p+") AND m.status='active' LIMIT 1",(email,)).fetchone()
+        if not company: return True
+        token=secrets.token_urlsafe(32); token_hash=hashlib.sha256(token.encode()).hexdigest()
+        if is_pg(conn):
+            conn.execute("UPDATE company_password_resets SET used_at=NOW() WHERE lower(email)=lower(%s) AND used_at IS NULL",(email,))
+            conn.execute("INSERT INTO company_password_resets(company_id,email,token_hash,expires_at) VALUES(%s,%s,%s,NOW()+INTERVAL '1 hour')",(company["id"],email,token_hash))
+        else:
+            now=time.strftime("%Y-%m-%d %H:%M:%S"); exp=time.strftime("%Y-%m-%d %H:%M:%S",time.localtime(time.time()+3600))
+            conn.execute("UPDATE company_password_resets SET used_at=? WHERE lower(email)=lower(?) AND used_at IS NULL",(now,email))
+            conn.execute("INSERT INTO company_password_resets(company_id,email,token_hash,expires_at,created_at) VALUES(?,?,?,?,?)",(company["id"],email,token_hash,exp,now))
+        conn.commit()
+        base=os.getenv("SUPPORTPILOT_PUBLIC_URL","").strip().rstrip("/") or ("https://"+os.getenv("RAILWAY_PUBLIC_DOMAIN","").strip().rstrip("/") if os.getenv("RAILWAY_PUBLIC_DOMAIN","").strip() else "")
+        if base and os.getenv("RESEND_API_KEY","").strip() and os.getenv("EMAIL_FROM","").strip():
+            link=base+"/reset-password?token="+urlencode({"token":token})[6:]
+            send_email(email,"SupportPilot — восстановление пароля",f"Ссылка для восстановления пароля: {link}\\n\\nСрок действия — 1 час.",f"<p>Запрос на восстановление пароля для <b>{html.escape(str(company['name']))}</b>.</p><p><a href='{html.escape(link,quote=True)}'>Восстановить пароль</a></p><p>Ссылка действует 1 час.</p>")
+        return True
+    finally:
+        conn.close()
+
+def confirm_password_reset(token,new_password):
+    token=str(token or "").strip(); validate_password(new_password)
+    if not token: raise ValueError("Недействительный токен")
+    token_hash=hashlib.sha256(token.encode()).hexdigest(); conn=db(); p="%s" if is_pg(conn) else "?"
+    try:
+        q="SELECT * FROM company_password_resets WHERE token_hash="+p+" AND used_at IS NULL AND expires_at>"+("NOW()" if is_pg(conn) else "datetime('now')")
+        reset=conn.execute(q,(token_hash,)).fetchone()
+        if not reset: raise ValueError("Ссылка недействительна или истекла")
+        h=hash_password(new_password)
+        if is_pg(conn):
+            conn.execute("UPDATE company_members SET password_hash=%s,updated_at=NOW() WHERE company_id=%s AND lower(email)=lower(%s)",(h,reset["company_id"],reset["email"]))
+            conn.execute("UPDATE companies SET password_hash=%s,updated_at=NOW() WHERE id=%s AND lower(owner_email)=lower(%s)",(h,reset["company_id"],reset["email"]))
+            conn.execute("DELETE FROM company_sessions WHERE company_id=%s AND lower(member_email)=lower(%s)",(reset["company_id"],reset["email"]))
+            conn.execute("UPDATE company_password_resets SET used_at=NOW() WHERE id=%s",(reset["id"],))
+        else:
+            conn.execute("UPDATE company_members SET password_hash=?,updated_at=datetime('now') WHERE company_id=? AND lower(email)=lower(?)",(h,reset["company_id"],reset["email"]))
+            conn.execute("UPDATE companies SET password_hash=?,updated_at=datetime('now') WHERE id=? AND lower(owner_email)=lower(?)",(h,reset["company_id"],reset["email"]))
+            conn.execute("DELETE FROM company_sessions WHERE company_id=? AND lower(member_email)=lower(?)",(reset["company_id"],reset["email"]))
+            conn.execute("UPDATE company_password_resets SET used_at=datetime('now') WHERE id=?",(reset["id"],))
+        conn.commit(); return True
+    finally: conn.close()
 
 def commercial_login(email,password):
     email=str(email or "").strip().lower()
@@ -1607,6 +1668,8 @@ def commercial_get(handler,path):
     if path=="/invite":
         p=parse_qs(urlparse(handler.path).query).get("token",[""])[0]
         return handler.serve_static("invite.html") if not p else handler.serve_static("invite.html")
+    if path=="/reset-password":
+        return handler.serve_static("reset-password.html")
     if path in ("/pricing","/register","/client","/account","/login-client"):
         files={"/pricing":"pricing.html","/register":"register.html","/client":"account.html","/account":"account.html","/login-client":"register.html"}
         fname=files.get(path,"pricing.html")
@@ -1620,6 +1683,17 @@ def commercial_get(handler,path):
         c=company_from_request(handler)
         if not c: return handler.send_json({"error":"authentication required"},401) or True
         return handler.send_json({"usage":company_usage(c["id"])})
+    if path=="/api/commercial/password-reset/request":
+        try:
+            request_password_reset(str(handler.body().get("email","")).strip())
+            return handler.send_json({"ok":True,"message":"Если аккаунт существует, инструкция отправлена на email."})
+        except Exception:
+            return handler.send_json({"ok":True,"message":"Если аккаунт существует, инструкция отправлена на email."})
+    if path=="/api/commercial/password-reset/confirm":
+        try:
+            p=handler.body(); confirm_password_reset(p.get("token",""),p.get("password",""))
+            return handler.send_json({"ok":True})
+        except ValueError as e: return handler.send_json({"error":str(e)},400)
     if path=="/api/commercial/invitations/preview":
         token=parse_qs(urlparse(handler.path).query).get("token",[""])[0]
         token_hash=hashlib.sha256(str(token).encode()).hexdigest()
@@ -1971,7 +2045,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         self._set_session_cookie=""
         path=urlparse(self.path).path
-        if path != "/api/webhooks/stripe" and path not in ("/api/login","/api/setup-admin","/api/chat","/api/leads","/api/commercial/register","/api/commercial/login","/api/commercial/logout","/api/commercial/invitations/accept","/api/internal/telegram/tickets","/api/internal/telegram/chat") and not self._require_csrf():
+        if path != "/api/webhooks/stripe" and path not in ("/api/login","/api/setup-admin","/api/chat","/api/leads","/api/commercial/register","/api/commercial/login","/api/commercial/logout","/api/commercial/invitations/accept","/api/commercial/password-reset/request","/api/commercial/password-reset/confirm","/api/internal/telegram/tickets","/api/internal/telegram/chat") and not self._require_csrf():
             return
         if commercial_post(self,path): return
         try: p=self.body()
