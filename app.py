@@ -397,7 +397,8 @@ def list_tickets(status=None, priority=None, search=None, assignee=None, unassig
     search=str(search or "").strip()[:120]; limit=min(max(int(limit),1),100)
     conn=db(); clauses=[]; vals=[]; p="%s" if is_pg(conn) else "?"
     if company_id is not None: clauses.append("company_id="+p); vals.append(str(company_id))
-    if status: clauses.append("status="+p); vals.append(status)    if priority: clauses.append("priority="+p); vals.append(priority)
+    if status: clauses.append("status="+p); vals.append(status)
+    if priority: clauses.append("priority="+p); vals.append(priority)
     if unassigned: clauses.append("(assignee IS NULL OR assignee='')")
     elif assignee: clauses.append("assignee="+p); vals.append(str(assignee).strip().lower()[:254])
     if search:
