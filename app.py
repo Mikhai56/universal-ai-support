@@ -1395,7 +1395,8 @@ def _table_exists(conn,name):
 
 def company_member_role(company_id,email):
     conn=db(); p="%s" if is_pg(conn) else "?"
-    try:        m=conn.execute("SELECT role FROM company_members WHERE company_id="+p+" AND lower(email)=lower("+p+") AND status='active'",(str(company_id),str(email or ""))).fetchone()
+    try:
+        m=conn.execute("SELECT role FROM company_members WHERE company_id="+p+" AND lower(email)=lower("+p+") AND status='active'",(str(company_id),str(email or ""))).fetchone()
         return str(m["role"]) if m else None
     finally:
         conn.close()
