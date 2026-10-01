@@ -796,7 +796,8 @@ def record_crypto_transaction(wallet_id,direction,amount,tx_hash="",note="",crea
     if direction not in {"in","out"}: raise ValueError("invalid crypto direction")
     amount=_money_amount(amount); tx_hash=str(tx_hash or "").strip()[:128]; note=str(note or "").strip()[:500]
     conn=db(); pg=is_pg(conn); p="%s" if pg else "?"
-    wallet=conn.execute("SELECT id FROM crypto_wallets WHERE id="+p+" AND company_id="+p,(int(wallet_id),str(company_id))).fetchone()    if not wallet: conn.close(); raise ValueError("wallet not found")
+    wallet=conn.execute("SELECT id FROM crypto_wallets WHERE id="+p+" AND company_id="+p,(int(wallet_id),str(company_id))).fetchone()
+    if not wallet: conn.close(); raise ValueError("wallet not found")
     if pg: conn.execute("INSERT INTO crypto_transactions(company_id,wallet_id,direction,asset,amount,tx_hash,note,created_by) VALUES(%s,%s,%s,'USDT',%s,%s,%s,%s,%s)",(str(company_id),int(wallet_id),direction,amount,tx_hash or None,note or None,created_by))
     else: conn.execute("INSERT INTO crypto_transactions(company_id,wallet_id,direction,asset,amount,tx_hash,note,created_by,created_at) VALUES(?,?,?,?,?,?,?,?,datetime('now'))",(str(company_id),int(wallet_id),direction,"USDT",amount,tx_hash or None,note or None,created_by))
     conn.commit(); conn.close(); return True
@@ -2006,7 +2007,8 @@ class Handler(BaseHTTPRequestHandler):
             lead_id=path.rsplit("/",1)[1]
             company=company_from_request(self)
             lead=get_lead(lead_id,company_id=company["id"] if company else None)
-            return self.send_json({"lead":lead,"events":list_lead_events(lead_id,company_id=company["id"] if company else None)} if lead else {"error":"lead not found"},200 if lead else 404)        if path=="/api/tickets":
+            return self.send_json({"lead":lead,"events":list_lead_events(lead_id,company_id=company["id"] if company else None)} if lead else {"error":"lead not found"},200 if lead else 404)
+        if path=="/api/tickets":
             company=company_from_request(self)
             if company:
                 params=parse_qs(urlparse(self.path).query)
