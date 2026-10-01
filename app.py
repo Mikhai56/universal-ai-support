@@ -197,8 +197,7 @@ def init_db():
           created_at TEXT NOT NULL, CHECK (role IN ('admin','operator','viewer')))
         """)
     if is_pg(conn):
-        conn.execute("ALTER TABLE operators ADD COLUMN IF NOT EXISTS display_name TEXT")
-        conn.execute("ALTER TABLE operators ADD COLUMN IF NOT EXISTS phone TEXT")
+        conn.execute("ALTER TABLE operators ADD COLUMN IF NOT EXISTS display_name TEXT")        conn.execute("ALTER TABLE operators ADD COLUMN IF NOT EXISTS phone TEXT")
         conn.execute("ALTER TABLE operators ADD COLUMN IF NOT EXISTS timezone TEXT DEFAULT 'Europe/Helsinki'")
         conn.execute("""CREATE TABLE IF NOT EXISTS operator_sessions(
           token TEXT PRIMARY KEY, email TEXT NOT NULL, role TEXT NOT NULL,
@@ -397,8 +396,7 @@ def list_tickets(status=None, priority=None, search=None, assignee=None, unassig
     search=str(search or "").strip()[:120]; limit=min(max(int(limit),1),100)
     conn=db(); clauses=[]; vals=[]; p="%s" if is_pg(conn) else "?"
     if company_id is not None: clauses.append("company_id="+p); vals.append(str(company_id))
-    if status: clauses.append("status="+p); vals.append(status)
-    if priority: clauses.append("priority="+p); vals.append(priority)
+    if status: clauses.append("status="+p); vals.append(status)    if priority: clauses.append("priority="+p); vals.append(priority)
     if unassigned: clauses.append("(assignee IS NULL OR assignee='')")
     elif assignee: clauses.append("assignee="+p); vals.append(str(assignee).strip().lower()[:254])
     if search:
@@ -597,8 +595,7 @@ def get_customer_detail(identifier="", company_id=None):
         "counts": {
             "tickets": len(ticket_rows),
             "open_tickets": sum(1 for x in ticket_rows if x.get("status") in ("open","answered","escalated","needs_clarification")),
-            "escalated_tickets": sum(1 for x in ticket_rows if x.get("status")=="escalated"),
-            "leads": len(leads),
+            "escalated_tickets": sum(1 for x in ticket_rows if x.get("status")=="escalated"),            "leads": len(leads),
             "conversations": len(conversations),
             "messages": sum(len(x.get("messages",[])) for x in conversations)
         },
@@ -797,8 +794,7 @@ def record_crypto_transaction(wallet_id,direction,amount,tx_hash="",note="",crea
     if direction not in {"in","out"}: raise ValueError("invalid crypto direction")
     amount=_money_amount(amount); tx_hash=str(tx_hash or "").strip()[:128]; note=str(note or "").strip()[:500]
     conn=db(); pg=is_pg(conn); p="%s" if pg else "?"
-    wallet=conn.execute("SELECT id FROM crypto_wallets WHERE id="+p+" AND company_id="+p,(int(wallet_id),str(company_id))).fetchone()
-    if not wallet: conn.close(); raise ValueError("wallet not found")
+    wallet=conn.execute("SELECT id FROM crypto_wallets WHERE id="+p+" AND company_id="+p,(int(wallet_id),str(company_id))).fetchone()    if not wallet: conn.close(); raise ValueError("wallet not found")
     if pg: conn.execute("INSERT INTO crypto_transactions(company_id,wallet_id,direction,asset,amount,tx_hash,note,created_by) VALUES(%s,%s,%s,'USDT',%s,%s,%s,%s,%s)",(str(company_id),int(wallet_id),direction,amount,tx_hash or None,note or None,created_by))
     else: conn.execute("INSERT INTO crypto_transactions(company_id,wallet_id,direction,asset,amount,tx_hash,note,created_by,created_at) VALUES(?,?,?,?,?,?,?,?,datetime('now'))",(str(company_id),int(wallet_id),direction,"USDT",amount,tx_hash or None,note or None,created_by))
     conn.commit(); conn.close(); return True
@@ -997,8 +993,7 @@ def init_commercial_db(conn=None):
           id TEXT PRIMARY KEY, name TEXT NOT NULL, slug TEXT UNIQUE NOT NULL,
           owner_email TEXT UNIQUE NOT NULL, password_hash TEXT NOT NULL,
           status TEXT NOT NULL DEFAULT 'active', plan TEXT NOT NULL DEFAULT 'free',
-          subscription_status TEXT NOT NULL DEFAULT 'trialing',
-          trial_ends_at TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)""")
+          subscription_status TEXT NOT NULL DEFAULT 'trialing',          trial_ends_at TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)""")
         conn.execute("""CREATE TABLE IF NOT EXISTS company_sessions(
           token TEXT PRIMARY KEY, company_id TEXT NOT NULL, member_id INTEGER, member_email TEXT, member_role TEXT,
           expires_at TEXT NOT NULL, created_at TEXT NOT NULL)""")
@@ -1197,8 +1192,7 @@ def confirm_password_reset(token,new_password):
         if is_pg(conn):
             conn.execute("UPDATE company_members SET password_hash=%s,updated_at=NOW() WHERE company_id=%s AND lower(email)=lower(%s)",(h,reset["company_id"],reset["email"]))
             conn.execute("UPDATE companies SET password_hash=%s,updated_at=NOW() WHERE id=%s AND lower(owner_email)=lower(%s)",(h,reset["company_id"],reset["email"]))
-            conn.execute("DELETE FROM company_sessions WHERE company_id=%s AND lower(member_email)=lower(%s)",(reset["company_id"],reset["email"]))
-            conn.execute("UPDATE company_password_resets SET used_at=NOW() WHERE id=%s",(reset["id"],))
+            conn.execute("DELETE FROM company_sessions WHERE company_id=%s AND lower(member_email)=lower(%s)",(reset["company_id"],reset["email"]))            conn.execute("UPDATE company_password_resets SET used_at=NOW() WHERE id=%s",(reset["id"],))
         else:
             conn.execute("UPDATE company_members SET password_hash=?,updated_at=datetime('now') WHERE company_id=? AND lower(email)=lower(?)",(h,reset["company_id"],reset["email"]))
             conn.execute("UPDATE companies SET password_hash=?,updated_at=datetime('now') WHERE id=? AND lower(owner_email)=lower(?)",(h,reset["company_id"],reset["email"]))
@@ -1397,8 +1391,7 @@ def _table_exists(conn,name):
 
 def company_member_role(company_id,email):
     conn=db(); p="%s" if is_pg(conn) else "?"
-    try:
-        m=conn.execute("SELECT role FROM company_members WHERE company_id="+p+" AND lower(email)=lower("+p+") AND status='active'",(str(company_id),str(email or ""))).fetchone()
+    try:        m=conn.execute("SELECT role FROM company_members WHERE company_id="+p+" AND lower(email)=lower("+p+") AND status='active'",(str(company_id),str(email or ""))).fetchone()
         return str(m["role"]) if m else None
     finally:
         conn.close()
@@ -1597,8 +1590,7 @@ def commercial_subscribe(company_id,plan):
     now_expr="NOW()" if is_pg(conn) else "datetime('now')"
     if not checkout and not dynamic:
         conn.close()
-        raise ValueError("Stripe не настроен: добавьте STRIPE_CHECKOUT_<PLAN>_URL или STRIPE_SECRET_KEY + STRIPE_PRICE_<PLAN>")
-    provider="stripe"
+        raise ValueError("Stripe не настроен: добавьте STRIPE_CHECKOUT_<PLAN>_URL или STRIPE_SECRET_KEY + STRIPE_PRICE_<PLAN>")    provider="stripe"
     if is_pg(conn):
         conn.execute("INSERT INTO company_subscriptions(company_id,plan,status,provider,current_period_end) VALUES(%s,%s,%s,%s,NULL)",(company_id,plan,"pending",provider))
     else:
@@ -1797,8 +1789,7 @@ def commercial_post(handler,path):
         c=company_from_request(handler)
         if not require_company_permission(handler,c,"manage"): return
         try:
-            p=handler.body(); invite_email=str(p.get("email","")).strip().lower(); invite_role=p.get("role","operator")
-            token=create_company_invitation(c,invite_email,invite_role)
+            p=handler.body(); invite_email=str(p.get("email","")).strip().lower(); invite_role=p.get("role","operator")            token=create_company_invitation(c,invite_email,invite_role)
             host=handler.headers.get("Host","")
             scheme="https" if (SECURE_COOKIES or handler.headers.get("X-Forwarded-Proto")=="https" or host.endswith(".up.railway.app")) else "http"
             invite_url=scheme+"://"+host+"/invite?token="+token
@@ -1846,8 +1837,24 @@ def commercial_post(handler,path):
         c=company_from_request(handler)
         if not require_company_permission(handler,c,"manage"): return
         try:
-            p=handler.body(); add_company_member(c["id"],p.get("email"),p.get("role","operator"))
-            return handler.send_json({"ok":True,"members":list_company_members(c["id"])},201)
+            p=handler.body()
+            invite_email=str(p.get("email","")).strip().lower()
+            invite_role=p.get("role","operator")
+            token=create_company_invitation(c,invite_email,invite_role)
+            host=handler.headers.get("Host","")
+            scheme="https" if (SECURE_COOKIES or handler.headers.get("X-Forwarded-Proto")=="https" or host.endswith(".up.railway.app")) else "http"
+            invite_url=scheme+"://"+host+"/invite?token="+token
+            email_sent=False
+            if os.getenv("RESEND_API_KEY","").strip() and os.getenv("EMAIL_FROM","").strip():
+                try:
+                    email_sent=send_email(invite_email,"Приглашение в SupportPilot",
+                        f"Вас пригласили в компанию {c.get('name','SupportPilot')}. Откройте ссылку: {invite_url}",
+                        "<p>Вас пригласили в компанию <b>"+html.escape(c.get("name","SupportPilot"))+"</b>.</p><p><a href='"+html.escape(invite_url,quote=True)+"'>Принять приглашение</a></p><p>Ссылка действительна 7 дней.</p>")
+                except RuntimeError:
+                    email_sent=False
+            return handler.send_json({"ok":True,"email":invite_email,"role":invite_role,
+                                      "invite_url":invite_url,"email_sent":email_sent,
+                                      "members":list_company_members(c["id"])},201)
         except ValueError as e: return handler.send_json({"error":str(e)},400)
     return False
 
@@ -1997,8 +2004,7 @@ class Handler(BaseHTTPRequestHandler):
             lead_id=path.rsplit("/",1)[1]
             company=company_from_request(self)
             lead=get_lead(lead_id,company_id=company["id"] if company else None)
-            return self.send_json({"lead":lead,"events":list_lead_events(lead_id,company_id=company["id"] if company else None)} if lead else {"error":"lead not found"},200 if lead else 404)
-        if path=="/api/tickets":
+            return self.send_json({"lead":lead,"events":list_lead_events(lead_id,company_id=company["id"] if company else None)} if lead else {"error":"lead not found"},200 if lead else 404)        if path=="/api/tickets":
             company=company_from_request(self)
             if company:
                 params=parse_qs(urlparse(self.path).query)
@@ -2197,8 +2203,7 @@ class Handler(BaseHTTPRequestHandler):
                     count=int(conn.execute("SELECT COUNT(*) AS n FROM operators").fetchone()["n"])
                     if count==0:
                         if not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+",email):
-                            conn.close()
-                            return self.send_json({"ok":False,"error":"invalid operator email"},400)
+                            conn.close()                            return self.send_json({"ok":False,"error":"invalid operator email"},400)
                         validate_password(password)
                         encoded=hash_password(password)
                         if is_pg(conn):
@@ -2397,8 +2402,7 @@ class Handler(BaseHTTPRequestHandler):
                 item_id=int(path.rsplit("/",1)[1])
                 ok=update_company_kb(c["id"],item_id,self.body())
                 return self.send_json({"ok":bool(ok),"items":company_kb_items(c["id"])},200 if ok else 404)
-            except (ValueError,TypeError) as e:
-                return self.send_json({"error":str(e)},400)
+            except (ValueError,TypeError) as e:                return self.send_json({"error":str(e)},400)
         if path.startswith("/api/commercial/members/"):
             c=company_from_request(self)
             if not require_company_permission(self,c,"manage"): return
