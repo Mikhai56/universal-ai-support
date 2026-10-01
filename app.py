@@ -1195,7 +1195,8 @@ def confirm_password_reset(token,new_password):
         if is_pg(conn):
             conn.execute("UPDATE company_members SET password_hash=%s,updated_at=NOW() WHERE company_id=%s AND lower(email)=lower(%s)",(h,reset["company_id"],reset["email"]))
             conn.execute("UPDATE companies SET password_hash=%s,updated_at=NOW() WHERE id=%s AND lower(owner_email)=lower(%s)",(h,reset["company_id"],reset["email"]))
-            conn.execute("DELETE FROM company_sessions WHERE company_id=%s AND lower(member_email)=lower(%s)",(reset["company_id"],reset["email"]))            conn.execute("UPDATE company_password_resets SET used_at=NOW() WHERE id=%s",(reset["id"],))
+            conn.execute("DELETE FROM company_sessions WHERE company_id=%s AND lower(member_email)=lower(%s)",(reset["company_id"],reset["email"]))
+            conn.execute("UPDATE company_password_resets SET used_at=NOW() WHERE id=%s",(reset["id"],))
         else:
             conn.execute("UPDATE company_members SET password_hash=?,updated_at=datetime('now') WHERE company_id=? AND lower(email)=lower(?)",(h,reset["company_id"],reset["email"]))
             conn.execute("UPDATE companies SET password_hash=?,updated_at=datetime('now') WHERE id=? AND lower(owner_email)=lower(?)",(h,reset["company_id"],reset["email"]))
@@ -2207,7 +2208,8 @@ class Handler(BaseHTTPRequestHandler):
                     count=int(conn.execute("SELECT COUNT(*) AS n FROM operators").fetchone()["n"])
                     if count==0:
                         if not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+",email):
-                            conn.close()                            return self.send_json({"ok":False,"error":"invalid operator email"},400)
+                            conn.close()
+                            return self.send_json({"ok":False,"error":"invalid operator email"},400)
                         validate_password(password)
                         encoded=hash_password(password)
                         if is_pg(conn):
