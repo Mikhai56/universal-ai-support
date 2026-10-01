@@ -197,7 +197,8 @@ def init_db():
           created_at TEXT NOT NULL, CHECK (role IN ('admin','operator','viewer')))
         """)
     if is_pg(conn):
-        conn.execute("ALTER TABLE operators ADD COLUMN IF NOT EXISTS display_name TEXT")        conn.execute("ALTER TABLE operators ADD COLUMN IF NOT EXISTS phone TEXT")
+        conn.execute("ALTER TABLE operators ADD COLUMN IF NOT EXISTS display_name TEXT")
+        conn.execute("ALTER TABLE operators ADD COLUMN IF NOT EXISTS phone TEXT")
         conn.execute("ALTER TABLE operators ADD COLUMN IF NOT EXISTS timezone TEXT DEFAULT 'Europe/Helsinki'")
         conn.execute("""CREATE TABLE IF NOT EXISTS operator_sessions(
           token TEXT PRIMARY KEY, email TEXT NOT NULL, role TEXT NOT NULL,
