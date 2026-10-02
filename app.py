@@ -1795,7 +1795,8 @@ def commercial_post(handler,path):
         c=company_from_request(handler)
         if not require_company_permission(handler,c,"manage"): return
         try:
-            p=handler.body(); invite_email=str(p.get("email","")).strip().lower(); invite_role=p.get("role","operator")            token=create_company_invitation(c,invite_email,invite_role)
+            p=handler.body(); invite_email=str(p.get("email","")).strip().lower(); invite_role=p.get("role","operator")
+            token=create_company_invitation(c,invite_email,invite_role)
             host=handler.headers.get("Host","")
             scheme="https" if (SECURE_COOKIES or handler.headers.get("X-Forwarded-Proto")=="https" or host.endswith(".up.railway.app")) else "http"
             invite_url=scheme+"://"+host+"/invite?token="+token
