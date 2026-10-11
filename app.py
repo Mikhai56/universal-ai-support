@@ -929,7 +929,18 @@ def session_token(h):
 def session(h):
     token=session_token(h)
     s=SESSIONS.get(token)
-    if s and s["expires"]>time.time(): return s
+    if s:
+        if s["expires"]>time.time(): return s
+        # Expired in-memory sessions must also be revoked in persistent storage;
+        # otherwise the same bearer token could be reloaded from the database.
+        SESSIONS.pop(token,None)
+        conn=db(); p="%s" if is_pg(conn) else "?"
+        try:
+            if token:
+                conn.execute("DELETE FROM operator_sessions WHERE token="+p,(token,))
+                conn.commit()
+            return None
+        finally: conn.close()
     conn=db(); p="%s" if is_pg(conn) else "?"
     try:
         rs=conn.execute("SELECT email,role,expires_at FROM operator_sessions WHERE token="+p,(token,)).fetchone() if token else None
