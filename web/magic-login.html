@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Вход в SupportPilot</title>
+<style>
+*{box-sizing:border-box}body{margin:0;min-height:100vh;display:grid;place-items:center;background:#f5f7fb;color:#172033;font-family:system-ui,-apple-system,sans-serif;padding:20px}.card{width:min(440px,100%);background:#fff;border:1px solid #e5eaf1;border-radius:16px;padding:28px;box-shadow:0 8px 32px #1720330d}h1{margin:0 0 12px;font-size:24px}p{line-height:1.5;color:#64748b}#status{padding:12px;border-radius:10px;background:#f1f5f9;color:#334155}a{color:#2563eb}
+</style></head><body><main class="card"><h1>Вход в SupportPilot</h1><p id="status">Проверяем одноразовую ссылку…</p><p><a href="/account">Вернуться ко входу</a></p></main>
+<script>
+(async()=>{
+ const status=document.getElementById('status');
+ const token=new URLSearchParams(location.search).get('token')||'';
+ if(!token){status.textContent='В ссылке отсутствует токен. Запросите новую ссылку.';return;}
+ try{
+  const response=await fetch('/api/commercial/passwordless/consume',{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json'},body:JSON.stringify({token})});
+  const data=await response.json().catch(()=>({}));
+  if(!response.ok)throw new Error(data.error||'Ссылка недействительна или истекла.');
+  status.textContent='Вход выполнен. Открываем личный кабинет…';
+  location.replace('/account');
+ }catch(error){status.textContent=error.message||'Не удалось выполнить вход. Запросите новую ссылку.';}
+})();
+</script></body></html>
