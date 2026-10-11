@@ -233,22 +233,24 @@ class SupportPilotTests(unittest.TestCase):
     def test_financial_ledger_and_usdt_wallet(self):
         app, path = load_app()
         app.create_operator("finance@example.com", "Financepass1234", "operator")
-        self.assertTrue(app.create_money_account("Основной счёт", "EUR"))
-        accounts = app.list_money_accounts()
+        # Finance and wallet records are tenant-scoped; use a test tenant explicitly.
+        company_id = "test-company"
+        self.assertTrue(app.create_money_account("Основной счёт", "EUR", company_id=company_id))
+        accounts = app.list_money_accounts(company_id=company_id)
         self.assertEqual(accounts[0]["balance"], "0.000000")
-        self.assertTrue(app.record_money_transaction(accounts[0]["id"], "credit", "125.50", "Пополнение", created_by="finance@example.com"))
-        self.assertEqual(app.list_money_accounts()[0]["balance"], "125.500000")
+        self.assertTrue(app.record_money_transaction(accounts[0]["id"], "credit", "125.50", "Пополнение", created_by="finance@example.com", company_id=company_id))
+        self.assertEqual(app.list_money_accounts(company_id=company_id)[0]["balance"], "125.500000")
         with self.assertRaises(ValueError):
-            app.record_money_transaction(accounts[0]["id"], "debit", "200", created_by="finance@example.com")
-        self.assertTrue(app.record_money_transaction(accounts[0]["id"], "debit", "25.50", "Расход", created_by="finance@example.com"))
-        self.assertEqual(app.list_money_accounts()[0]["balance"], "100.000000")
-        self.assertTrue(app.add_crypto_wallet("Мой USDT", "ethereum", "0x1111111111111111111111111111111111111111", "finance@example.com"))
-        wallet = app.crypto_wallet_balances()[0]
+            app.record_money_transaction(accounts[0]["id"], "debit", "200", created_by="finance@example.com", company_id=company_id)
+        self.assertTrue(app.record_money_transaction(accounts[0]["id"], "debit", "25.50", "Расход", created_by="finance@example.com", company_id=company_id))
+        self.assertEqual(app.list_money_accounts(company_id=company_id)[0]["balance"], "100.000000")
+        self.assertTrue(app.add_crypto_wallet("Мой USDT", "ethereum", "0x1111111111111111111111111111111111111111", "finance@example.com", company_id=company_id))
+        wallet = app.crypto_wallet_balances(company_id=company_id)[0]
         self.assertEqual(wallet["balance"], "0.000000")
-        self.assertTrue(app.record_crypto_transaction(wallet["id"], "in", "50", "0xabc123", "Пополнение", "finance@example.com"))
-        self.assertEqual(app.crypto_wallet_balances()[0]["balance"], "50.000000")
+        self.assertTrue(app.record_crypto_transaction(wallet["id"], "in", "50", "0xabc123", "Пополнение", "finance@example.com", company_id=company_id))
+        self.assertEqual(app.crypto_wallet_balances(company_id=company_id)[0]["balance"], "50.000000")
         with self.assertRaises(ValueError):
-            app.add_crypto_wallet("Bad", "ethereum", "not-an-address", "finance@example.com")
+            app.add_crypto_wallet("Bad", "ethereum", "not-an-address", "finance@example.com", company_id=company_id)
         os.unlink(path)
 
     def test_unassigned_ticket_filter(self):
