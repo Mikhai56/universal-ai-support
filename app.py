@@ -656,7 +656,7 @@ def _money_amount(value):
 def init_finance_db(conn):
     if is_pg(conn):
         conn.execute("""CREATE TABLE IF NOT EXISTS money_accounts(
-          id BIGSERIAL PRIMARY KEY, name TEXT NOT NULL, currency TEXT NOT NULL,
+          id BIGSERIAL PRIMARY KEY, company_id TEXT, name TEXT NOT NULL, currency TEXT NOT NULL,
           created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), UNIQUE(company_id,name,currency))""")
         conn.execute("""CREATE TABLE IF NOT EXISTS money_transactions(
           id BIGSERIAL PRIMARY KEY, account_id BIGINT NOT NULL, kind TEXT NOT NULL,
@@ -664,7 +664,7 @@ def init_finance_db(conn):
           created_by TEXT NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
           CHECK (kind IN ('credit','debit')))""")
         conn.execute("""CREATE TABLE IF NOT EXISTS crypto_wallets(
-          id BIGSERIAL PRIMARY KEY, label TEXT NOT NULL, network TEXT NOT NULL,
+          id BIGSERIAL PRIMARY KEY, company_id TEXT, label TEXT NOT NULL, network TEXT NOT NULL,
           address TEXT NOT NULL, asset TEXT NOT NULL DEFAULT 'USDT',
           created_by TEXT NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
           UNIQUE(company_id,network,address,asset))""")
@@ -676,7 +676,7 @@ def init_finance_db(conn):
           CHECK (direction IN ('in','out')))""")
     else:
         conn.execute("""CREATE TABLE IF NOT EXISTS money_accounts(
-          id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, currency TEXT NOT NULL,
+          id INTEGER PRIMARY KEY AUTOINCREMENT, company_id TEXT, name TEXT NOT NULL, currency TEXT NOT NULL,
           created_at TEXT NOT NULL, UNIQUE(company_id,name,currency))""")
         conn.execute("""CREATE TABLE IF NOT EXISTS money_transactions(
           id INTEGER PRIMARY KEY AUTOINCREMENT, account_id INTEGER NOT NULL, kind TEXT NOT NULL,
@@ -684,7 +684,7 @@ def init_finance_db(conn):
           created_by TEXT NOT NULL, created_at TEXT NOT NULL,
           CHECK (kind IN ('credit','debit')))""")
         conn.execute("""CREATE TABLE IF NOT EXISTS crypto_wallets(
-          id INTEGER PRIMARY KEY AUTOINCREMENT, label TEXT NOT NULL, network TEXT NOT NULL,
+          id INTEGER PRIMARY KEY AUTOINCREMENT, company_id TEXT, label TEXT NOT NULL, network TEXT NOT NULL,
           address TEXT NOT NULL, asset TEXT NOT NULL DEFAULT 'USDT',
           created_by TEXT NOT NULL, created_at TEXT NOT NULL,
           UNIQUE(company_id,network,address,asset))""")
@@ -929,7 +929,18 @@ def session_token(h):
 def session(h):
     token=session_token(h)
     s=SESSIONS.get(token)
-    if s and s["expires"]>time.time(): return s
+    if s:
+        if s["expires"]>time.time(): return s
+        # Expired in-memory sessions must also be revoked in persistent storage;
+        # otherwise the same bearer token could be reloaded from the database.
+        SESSIONS.pop(token,None)
+        conn=db(); p="%s" if is_pg(conn) else "?"
+        try:
+            if token:
+                conn.execute("DELETE FROM operator_sessions WHERE token="+p,(token,))
+                conn.commit()
+            return None
+        finally: conn.close()
     conn=db(); p="%s" if is_pg(conn) else "?"
     try:
         rs=conn.execute("SELECT email,role,expires_at FROM operator_sessions WHERE token="+p,(token,)).fetchone() if token else None
