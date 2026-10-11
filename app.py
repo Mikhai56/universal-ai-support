@@ -1039,6 +1039,11 @@ def init_commercial_db(conn=None):
           token_hash TEXT UNIQUE NOT NULL, expires_at TIMESTAMPTZ NOT NULL,
           used_at TIMESTAMPTZ, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())""")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_company_resets_token ON company_password_resets(token_hash,status)".replace(",status",""))
+        conn.execute("""CREATE TABLE IF NOT EXISTS company_magic_links(
+          id BIGSERIAL PRIMARY KEY, company_id TEXT NOT NULL, member_id BIGINT NOT NULL,
+          email TEXT NOT NULL, token_hash TEXT UNIQUE NOT NULL, expires_at TIMESTAMPTZ NOT NULL,
+          used_at TIMESTAMPTZ, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())""")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_company_magic_links_email ON company_magic_links(email,used_at)")
     else:
         cols={r["name"] for r in conn.execute("PRAGMA table_info(company_sessions)").fetchall()}
         for col in ("member_id","member_email","member_role"):
@@ -1056,6 +1061,11 @@ def init_commercial_db(conn=None):
           token_hash TEXT UNIQUE NOT NULL, expires_at TEXT NOT NULL,
           used_at TEXT, created_at TEXT NOT NULL)""")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_company_resets_token ON company_password_resets(token_hash)")
+        conn.execute("""CREATE TABLE IF NOT EXISTS company_magic_links(
+          id INTEGER PRIMARY KEY AUTOINCREMENT, company_id TEXT NOT NULL, member_id INTEGER NOT NULL,
+          email TEXT NOT NULL, token_hash TEXT UNIQUE NOT NULL, expires_at TEXT NOT NULL,
+          used_at TEXT, created_at TEXT NOT NULL)""")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_company_magic_links_email ON company_magic_links(email,used_at)")
         conn.execute("UPDATE company_members SET password_hash=(SELECT password_hash FROM companies c WHERE c.id=company_members.company_id) WHERE role='owner' AND password_hash IS NULL")
     if pg:
         conn.execute("""CREATE TABLE IF NOT EXISTS company_kb(
@@ -1215,6 +1225,90 @@ def confirm_password_reset(token,new_password):
             conn.execute("UPDATE company_password_resets SET used_at=datetime('now') WHERE id=?",(reset["id"],))
         conn.commit(); return True
     finally: conn.close()
+
+def request_passwordless_login(email):
+    """Create a short-lived, single-use email login link."""
+    email=str(email or "").strip().lower()
+    if not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+",email):
+        return False
+    if not os.getenv("RESEND_API_KEY","").strip() or not os.getenv("EMAIL_FROM","").strip():
+        raise RuntimeError("Вход без пароля пока не настроен: нужно подключить Resend.")
+    conn=db(); p="%s" if is_pg(conn) else "?"
+    try:
+        member=conn.execute("""SELECT m.id,m.company_id,c.name
+          FROM company_members m JOIN companies c ON c.id=m.company_id
+          WHERE lower(m.email)=lower("""+p+""") AND m.status='active' AND c.status='active'
+          LIMIT 1""",(email,)).fetchone()
+        if not member:
+            return False
+        token=secrets.token_urlsafe(40)
+        token_hash=hashlib.sha256(token.encode()).hexdigest()
+        if is_pg(conn):
+            conn.execute("UPDATE company_magic_links SET used_at=NOW() WHERE lower(email)=lower(%s) AND used_at IS NULL",(email,))
+            conn.execute("INSERT INTO company_magic_links(company_id,member_id,email,token_hash,expires_at) VALUES(%s,%s,%s,%s,NOW()+INTERVAL '15 minutes')",(member["company_id"],member["id"],email,token_hash))
+        else:
+            now=time.strftime("%Y-%m-%d %H:%M:%S")
+            exp=time.strftime("%Y-%m-%d %H:%M:%S",time.localtime(time.time()+900))
+            conn.execute("UPDATE company_magic_links SET used_at=? WHERE lower(email)=lower(?) AND used_at IS NULL",(now,email))
+            conn.execute("INSERT INTO company_magic_links(company_id,member_id,email,token_hash,expires_at,created_at) VALUES(?,?,?,?,?,?)",(member["company_id"],member["id"],email,token_hash,exp,now))
+        conn.commit()
+    finally:
+        conn.close()
+    base_url=os.getenv("SUPPORTPILOT_PUBLIC_URL","").strip().rstrip("/") or "https://supportpilot-web-pa5s.onrender.com"
+    link=base_url+"/magic-login?token="+quote(token,safe="")
+    try:
+        sent=send_email(email,"SupportPilot — вход без пароля",
+          "Для входа откройте ссылку: "+link+"\nСрок действия — 15 минут, одно использование.",
+          "<p>Запрошен вход в SupportPilot.</p><p><a href='"+html.escape(link,quote=True)+"'>Войти в SupportPilot</a></p><p>Ссылка действует 15 минут и может быть использована один раз.</p>")
+        if not sent:
+            raise RuntimeError("Не удалось отправить письмо.")
+    except Exception:
+        conn=db()
+        if is_pg(conn):
+            conn.execute("UPDATE company_magic_links SET used_at=NOW() WHERE token_hash=%s AND used_at IS NULL",(token_hash,))
+        else:
+            conn.execute("UPDATE company_magic_links SET used_at=datetime('now') WHERE token_hash=? AND used_at IS NULL",(token_hash,))
+        conn.commit(); conn.close()
+        raise
+    return True
+
+def consume_passwordless_login(token):
+    token=str(token or "").strip()
+    if not token or len(token)>256:
+        raise ValueError("Ссылка недействительна или истекла.")
+    token_hash=hashlib.sha256(token.encode()).hexdigest()
+    conn=db(); pg=is_pg(conn); p="%s" if pg else "?"
+    try:
+        expiry="NOW()" if pg else "datetime('now')"
+        link=conn.execute("SELECT * FROM company_magic_links WHERE token_hash="+p+" AND used_at IS NULL AND expires_at>"+expiry,(token_hash,)).fetchone()
+        if not link:
+            raise ValueError("Ссылка недействительна или истекла.")
+        member=conn.execute("""SELECT m.id,m.company_id,m.email,m.role,c.name,c.slug,c.plan,c.subscription_status,c.status AS company_status
+          FROM company_members m JOIN companies c ON c.id=m.company_id
+          WHERE m.id="""+p+""" AND m.company_id="""+p+""" AND lower(m.email)=lower("""+p+""")
+          AND m.status='active'""",(link["member_id"],link["company_id"],link["email"])).fetchone()
+        if not member or member["company_status"]!="active":
+            raise ValueError("Аккаунт недоступен.")
+        now="NOW()" if pg else "datetime('now')"
+        changed=conn.execute("UPDATE company_magic_links SET used_at="+now+" WHERE id="+p+" AND used_at IS NULL",(link["id"],))
+        if changed.rowcount != 1:
+            raise ValueError("Ссылка уже использована.")
+        session=commercial_token()
+        if pg:
+            conn.execute("""INSERT INTO company_sessions(token,company_id,member_id,member_email,member_role,expires_at)
+              VALUES(%s,%s,%s,%s,%s,NOW()+INTERVAL '30 days')""",(session,member["company_id"],member["id"],member["email"],member["role"]))
+        else:
+            created=time.strftime("%Y-%m-%d %H:%M:%S")
+            exp=time.strftime("%Y-%m-%d %H:%M:%S",time.localtime(time.time()+COMMERCIAL_SESSION_TTL))
+            conn.execute("INSERT INTO company_sessions(token,company_id,member_id,member_email,member_role,expires_at,created_at) VALUES(?,?,?,?,?,?,?)",
+              (session,member["company_id"],member["id"],member["email"],member["role"],exp,created))
+        conn.commit()
+        company={"id":member["company_id"],"name":member["name"],"slug":member["slug"],"plan":member["plan"],
+          "subscription_status":member["subscription_status"],"member_id":member["id"],"member_email":member["email"],
+          "member_role":member["role"],"owner_email":member["email"] if member["role"]=="owner" else None}
+        return session,company
+    finally:
+        conn.close()
 
 def commercial_login(email,password):
     email=str(email or "").strip().lower()
@@ -1712,6 +1806,8 @@ def commercial_get(handler,path):
         return handler.serve_static("invite.html") if not p else handler.serve_static("invite.html")
     if path=="/reset-password":
         return handler.serve_static("reset-password.html")
+    if path=="/magic-login":
+        return handler.serve_static("magic-login.html")
     if path in ("/pricing","/register","/client","/account","/login-client"):
         files={"/pricing":"pricing.html","/register":"register.html","/client":"account.html","/account":"account.html","/login-client":"register.html"}
         fname=files.get(path,"pricing.html")
@@ -1784,6 +1880,23 @@ def commercial_get(handler,path):
     return False
 
 def commercial_post(handler,path):
+    if path=="/api/commercial/passwordless/request":
+        try:
+            request_passwordless_login(str(handler.body().get("email","")).strip())
+            return handler.send_json({"ok":True,"message":"Если аккаунт существует, ссылка для входа отправлена на email."})
+        except RuntimeError as e:
+            return handler.send_json({"error":str(e)},503)
+        except Exception:
+            return handler.send_json({"ok":True,"message":"Если аккаунт существует, ссылка для входа отправлена на email."})
+    if path=="/api/commercial/passwordless/consume":
+        try:
+            token,company=consume_passwordless_login(handler.body().get("token",""))
+            handler._set_commercial_cookie=token
+            return handler.send_json({"ok":True,"company":{"id":company["id"],"name":company["name"]}})
+        except ValueError as e:
+            return handler.send_json({"error":str(e)},400)
+        except Exception:
+            return handler.send_json({"error":"Не удалось выполнить вход. Запросите новую ссылку."},500)
     if path=="/api/commercial/channels":
         c=company_from_request(handler)
         if not require_company_permission(handler,c,"manage"): return
@@ -2120,7 +2233,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         self._set_session_cookie=""
         path=urlparse(self.path).path
-        if path != "/api/webhooks/stripe" and path not in ("/api/login","/api/setup-admin","/api/chat","/api/leads","/api/commercial/register","/api/commercial/login","/api/commercial/logout","/api/commercial/invitations/accept","/api/commercial/password-reset/request","/api/commercial/password-reset/confirm","/api/internal/telegram/tickets","/api/internal/telegram/chat") and not self._require_csrf():
+        if path != "/api/webhooks/stripe" and path not in ("/api/login","/api/setup-admin","/api/chat","/api/leads","/api/commercial/register","/api/commercial/login","/api/commercial/logout","/api/commercial/invitations/accept","/api/commercial/password-reset/request","/api/commercial/password-reset/confirm","/api/commercial/passwordless/request","/api/commercial/passwordless/consume","/api/internal/telegram/tickets","/api/internal/telegram/chat") and not self._require_csrf():
             return
         if commercial_post(self,path): return
         try: p=self.body()
