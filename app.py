@@ -2038,6 +2038,7 @@ class Handler(BaseHTTPRequestHandler):
         elif getattr(self,"_set_session_cookie",""):
             self.send_header("Set-Cookie",session_cookie(self._set_session_cookie))
         self.end_headers(); self.wfile.write(body)
+        return True
     def body(self):
         n=int(self.headers.get("Content-Length","0"))
         if n>1_000_000: raise ValueError("request too large")
