@@ -1196,7 +1196,9 @@ def request_password_reset(email):
             conn.execute("UPDATE company_password_resets SET used_at=? WHERE lower(email)=lower(?) AND used_at IS NULL",(now,email))
             conn.execute("INSERT INTO company_password_resets(company_id,email,token_hash,expires_at,created_at) VALUES(?,?,?,?,?)",(company["id"],email,token_hash,exp,now))
         conn.commit()
-        base=os.getenv("SUPPORTPILOT_PUBLIC_URL","").strip().rstrip("/") or ("https://"+os.getenv("RAILWAY_PUBLIC_DOMAIN","").strip().rstrip("/") if os.getenv("RAILWAY_PUBLIC_DOMAIN","").strip() else "")
+        base=(os.getenv("SUPPORTPILOT_PUBLIC_URL","").strip().rstrip("/")
+              or os.getenv("RENDER_EXTERNAL_URL","").strip().rstrip("/")
+              or ("https://"+os.getenv("RAILWAY_PUBLIC_DOMAIN","").strip().rstrip("/") if os.getenv("RAILWAY_PUBLIC_DOMAIN","").strip() else ""))
         if base and os.getenv("RESEND_API_KEY","").strip() and os.getenv("EMAIL_FROM","").strip():
             link=base+"/reset-password?token="+quote(token,safe="")
             send_email(email,"SupportPilot — восстановление пароля",f"Ссылка для восстановления пароля: {link}\\n\\nСрок действия — 1 час.",f"<p>Запрос на восстановление пароля для <b>{html.escape(str(company['name']))}</b>.</p><p><a href='{html.escape(link,quote=True)}'>Восстановить пароль</a></p><p>Ссылка действует 1 час.</p>")
@@ -1832,23 +1834,12 @@ def commercial_get(handler,path):
             "stripe":{"configured":stripe_secret and stripe_prices or stripe_static,"dynamic_checkout":stripe_secret and stripe_prices,"static_checkout":stripe_static,"webhook":bool(os.getenv("STRIPE_WEBHOOK_SECRET","").strip())},
             "email":{"configured":resend,"provider":"resend" if resend else None},
             "telegram":{"service_configured":telegram_service,"company_channel_connected":telegram_channel,"ready":telegram_service and telegram_channel},
-            "public_url":("https://"+os.getenv("RAILWAY_PUBLIC_DOMAIN","").strip()) if os.getenv("RAILWAY_PUBLIC_DOMAIN","").strip() else ""
+            "public_url":(os.getenv("SUPPORTPILOT_PUBLIC_URL","").strip().rstrip("/") or os.getenv("RENDER_EXTERNAL_URL","").strip().rstrip("/") or ("https://"+os.getenv("RAILWAY_PUBLIC_DOMAIN","").strip() if os.getenv("RAILWAY_PUBLIC_DOMAIN","").strip() else ""))
         }})
     if path=="/api/commercial/usage":
         c=company_from_request(handler)
         if not c: return handler.send_json({"error":"authentication required"},401) or True
         return handler.send_json({"usage":company_usage(c["id"])})
-    if path=="/api/commercial/password-reset/request":
-        try:
-            request_password_reset(str(handler.body().get("email","")).strip())
-            return handler.send_json({"ok":True,"message":"Если аккаунт существует, инструкция отправлена на email."})
-        except Exception:
-            return handler.send_json({"ok":True,"message":"Если аккаунт существует, инструкция отправлена на email."})
-    if path=="/api/commercial/password-reset/confirm":
-        try:
-            p=handler.body(); confirm_password_reset(p.get("token",""),p.get("password",""))
-            return handler.send_json({"ok":True})
-        except ValueError as e: return handler.send_json({"error":str(e)},400)
     if path=="/api/commercial/invitations/preview":
         token=parse_qs(urlparse(handler.path).query).get("token",[""])[0]
         token_hash=hashlib.sha256(str(token).encode()).hexdigest()
@@ -1880,6 +1871,22 @@ def commercial_get(handler,path):
     return False
 
 def commercial_post(handler,path):
+    if path=="/api/commercial/password-reset/request":
+        try:
+            request_password_reset(str(handler.body().get("email","")).strip())
+            return handler.send_json({"ok":True,"message":"Если аккаунт существует и почта настроена, инструкция отправлена на email."})
+        except Exception:
+            # Do not disclose whether an email belongs to an account.
+            return handler.send_json({"ok":True,"message":"Если аккаунт существует и почта настроена, инструкция отправлена на email."})
+    if path=="/api/commercial/password-reset/confirm":
+        try:
+            p=handler.body()
+            confirm_password_reset(p.get("token",""),p.get("password",""))
+            return handler.send_json({"ok":True})
+        except ValueError as e:
+            return handler.send_json({"error":str(e)},400)
+        except Exception:
+            return handler.send_json({"error":"Не удалось изменить пароль. Попробуйте запросить новую ссылку."},500)
     if path=="/api/commercial/passwordless/request":
         try:
             request_passwordless_login(str(handler.body().get("email","")).strip())
